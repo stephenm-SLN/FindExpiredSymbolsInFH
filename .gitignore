@@ -1,0 +1,11 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Local secrets (NEVER commit)
+.DBCreds.*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/

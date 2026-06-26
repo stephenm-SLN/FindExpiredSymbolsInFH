@@ -1,0 +1,51 @@
+# Maps DB exchange_name (uppercase, as stored in crypto_db.fh_config.exchange_name)
+# to ccxt exchange id (lowercase, as used by the ccxt library).
+#
+# Unknown exchange_name values surface as ERROR rows in the report; add a new
+# entry here to fix.
+
+APEX: apex
+ASTER: aster
+BACKPACK: backpack
+BINANCE: binance
+BINANCEDM: binanceusdm
+BINANCEDMCOIN: binancecoinm
+BITGET: bitget
+BITGETDM: bitget
+BITHUMB: bithumb
+BITSTAMP: bitstamp
+BITVAVO: bitvavo
+BYBIT: bybit
+BYBITDM: bybit
+CBITL: coinbaseinternational
+COINBASE: coinbase
+COINONE: coinone
+CRYPTOCOM: cryptocom
+CRYPTOCOMDM: cryptocom
+DYDXV4: dydx
+GATEIO: gate
+GATEIODM: gate
+GRVT: grvt
+HLCASH: hyperliquid
+HLFLX: hyperliquid
+HLKM: hyperliquid
+HLXYZ: hyperliquid
+HUOBI: htx
+HUOBICOINSWAP: htx
+HUOBIDM: htx
+HYPERLIQUID: hyperliquid
+KRAKEN: kraken
+KRAKENDM: krakenfutures
+KUCOIN: kucoin
+KUCOINDM: kucoinfutures
+LIGHTER: lighter
+MEXC: mexc
+OKEX: okx
+PARADEX: paradex
+PHEMEX: phemex
+PHEMEXDMCOIN: phemex
+PHEMEXDMT: phemex
+UPBIT: upbit
+WHITEBITDM: whitebit
+WOO: woo
+WOODEX: woofipro

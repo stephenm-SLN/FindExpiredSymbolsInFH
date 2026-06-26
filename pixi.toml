@@ -1,0 +1,32 @@
+[workspace]
+authors = ["stephenm-SLN <stephen.m@selinicapital.com>"]
+channels = ["conda-forge"]
+name = "FindExpiredSymbolsInFH"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[pypi-options]
+index-url = "https://pypi.org/simple"
+extra-index-urls = ["https://nexus.selini.tech/repository/pypi-hosted/simple"]
+
+[tasks]
+
+[dependencies]
+python = ">=3.10,<3.14"
+pymysql = ">=1.1"
+pyyaml = ">=6"
+
+[pypi-dependencies]
+ccxt = ">=4"
+
+[feature.dev.dependencies]
+pytest = "*"
+mypy = "*"
+ruff = "*"
+
+[feature.dev.pypi-dependencies]
+types-PyYAML = "*"
+types-PyMySQL = "*"
+
+[environments]
+dev = ["dev"]

@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Find Expired Symbols \u2014 TA-TKY-A-41",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/find_expired_symbols.py",
+      "args": ["--hostname", "TA-TKY-A-41", "--log-level", "DEBUG"],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Find Expired Symbols \u2014 JSON to file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/find_expired_symbols.py",
+      "args": [
+        "--hostname",
+        "TA-TKY-A-41",
+        "--output",
+        "json",
+        "--output-file",
+        "${workspaceFolder}/out.json"
+      ],
+      "console": "integratedTerminal"
+    }
+  ]
+}
