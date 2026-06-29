@@ -26,6 +26,7 @@ Output is text (with a per-feed-handler summary table), JSON, or CSV.
 - [Sample output](#sample-output)
 - [CLI reference](#cli-reference)
 - [Exit codes](#exit-codes)
+- [How statuses are determined](#how-statuses-are-determined)
 - [How symbol translation works](#how-symbol-translation-works)
 - [Adding a new exchange](#adding-a-new-exchange)
 - [Development](#development)
@@ -403,6 +404,69 @@ omitting all three is rejected by `argparse` (exit 2).
 | `1`   | Ran successfully; at least one `DELISTED` / `INACTIVE` symbol was found       |
 | `2`   | Operational failure (bad args, creds, DB, exchange map, I/O, unhandled exc.) |
 | `130` | Interrupted (`Ctrl-C`)                                                        |
+
+`ERROR` rows in the report do **not** affect the exit code — see
+[How statuses are determined](#how-statuses-are-determined) below.
+
+## How statuses are determined
+
+Each symbol in the report ends up with exactly one of four statuses. The
+rule used depends on whether the venue is ccxt-backed (the default path)
+or checked through a custom-venue module.
+
+### ccxt-backed venues
+
+For every ccxt id in scope, the tool calls `ccxt.<id>().load_markets()`
+once and looks each FH symbol up (uppercased) in the resulting
+`{symbol: market}` dict:
+
+| Status     | Rule                                                                       | `detail` field           |
+| ---------- | -------------------------------------------------------------------------- | ------------------------ |
+| `LISTED`   | symbol exists in `markets`; `markets[sym]["active"]` is `True` or missing  | empty                    |
+| `INACTIVE` | symbol exists in `markets`, but `markets[sym]["active"]` is `False`        | `market.active is False` |
+| `DELISTED` | symbol does **not** exist in `markets`                                     | empty                    |
+
+`active` is ccxt's pass-through of the venue's own "this market is still
+trading" flag. A symbol the venue still describes but has flagged as no
+longer tradable surfaces as `INACTIVE` rather than `DELISTED`.
+
+This is the only path that can produce `INACTIVE` for ccxt-backed venues —
+if you see `INACTIVE` rows in the report, the venue itself reported the
+market as `active=False` (typically a precursor to delisting on most
+CEXes).
+
+### Custom-venue checkers
+
+The shipped custom venues map their venue-specific signals onto the same
+triple but with different rules:
+
+- **NADO** — `trading_status == "live"` → `LISTED`. Any other status
+  (`post_only`, `reduce_only`, `soft_reduce_only`, `not_tradable`) →
+  `INACTIVE`. Symbol absent from `/v2/symbols` → `DELISTED`.
+- **POLYMARKETPERPS** — present in the response → `LISTED`; absent →
+  `DELISTED`. The `/v1/info/instruments` endpoint exposes no active flag,
+  so this venue **never produces `INACTIVE`**.
+
+See [Adding a custom (non-ccxt) venue](#adding-a-custom-non-ccxt-venue)
+for how the registered checkers plug in.
+
+### `ERROR`
+
+`ERROR` is **not** a venue-side status — it means the tool itself could
+not classify the symbol. The `detail` field explains why:
+
+| Trigger                                                                                                       | `detail` text starts with                    |
+| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| FH `exchange_name` has no entry in `exchange_mapping.yaml` and is not a registered custom venue               | `unknown exchange_name=...`                  |
+| ccxt's `load_markets()` raised a recognised `MarketLoadError` (network, rate-limit, unsupported exchange, …)  | `load_markets failed: ...`                   |
+| ccxt raised an unexpected exception                                                                           | `unexpected ccxt error: ...`                 |
+| A custom venue's `fetch_symbols()` raised                                                                     | `custom venue fetch failed: ...`             |
+| Internal: a `custom:NAME` sentinel id with no registered checker                                              | `no custom-venue checker registered for ...` |
+
+`ERROR` rows are recorded in the report so you can investigate, but they
+do **not** affect the exit code — only `DELISTED + INACTIVE` counts
+trigger exit `1` under `--fail-on-invalid`. Use `--errors-only` to filter
+the report to feed handlers that have at least one `ERROR` row.
 
 ## How symbol translation works
 
