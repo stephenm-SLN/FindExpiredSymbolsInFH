@@ -6,10 +6,12 @@ import json
 
 from fh_symbol_check.models import SymbolResult
 from fh_symbol_check.reporter import (
+    ExchangeSummary,
     FeedHandlerSummary,
     keep_fhs_with_errors,
     render,
     summary,
+    summary_by_exchange,
     summary_by_fh,
 )
 
@@ -358,3 +360,176 @@ def test_render_text_summary_table_has_total_row() -> None:
     assert cells[0] == "TOTAL"
     assert cells[1] == "" and cells[2] == ""
     assert cells[3:] == ["5", "1", "1", "1", "2", "8"]
+
+
+# ---------------------------------------------------------------------------
+# summary_by_exchange + --exchange-grouping
+# ---------------------------------------------------------------------------
+
+
+def _make_two_exchange_dataset() -> list[SymbolResult]:
+    """Two FHs on HUOBI (one on each host) + one FH on WOODEX, mixed statuses."""
+    return [
+        # HUOBI / TA-TKY-A-41 / fh_huobi_4002: 2 LISTED, 1 DELISTED
+        _r("LISTED", symbol="A/USDT"),
+        _r("LISTED", symbol="B/USDT"),
+        _r("DELISTED", symbol="C/USDT"),
+        # HUOBI / TA-TKY-A-95 / fh_huobi_4006: 1 LISTED, 1 INACTIVE, 1 ERROR
+        _r("LISTED", symbol="D/USDT", hostname="TA-TKY-A-95_LOCAL", fh_name="fh_huobi_4006", service_id=4006),
+        _r("INACTIVE", symbol="E/USDT", hostname="TA-TKY-A-95_LOCAL", fh_name="fh_huobi_4006", service_id=4006),
+        _r("ERROR", symbol="F/USDT", hostname="TA-TKY-A-95_LOCAL", fh_name="fh_huobi_4006", service_id=4006, detail="boom"),
+        # WOODEX / TA-TKY-A-41 / fh_woodex_4003: 1 LISTED only
+        _r(
+            "LISTED",
+            symbol="X/USDC-PERP",
+            ccxt_symbol="X/USDC:USDC",
+            exchange_name="WOODEX",
+            ccxt_id="woofipro",
+            fh_name="fh_woodex_4003",
+            service_id=4003,
+        ),
+    ]
+
+
+def test_summary_by_exchange_aggregates_correctly() -> None:
+    results = _make_two_exchange_dataset()
+    by_ex = summary_by_exchange(results)
+    by_name = {s.exchange_name: s for s in by_ex}
+
+    assert set(by_name) == {"HUOBI", "WOODEX"}
+
+    huobi = by_name["HUOBI"]
+    assert huobi.feed_handlers == 2  # two distinct (hostname, fh_name) pairs
+    assert (huobi.active, huobi.inactive, huobi.delisted, huobi.error) == (3, 1, 1, 1)
+    assert huobi.total_dead == 2  # inactive + delisted
+    assert huobi.total == 6
+
+    woodex = by_name["WOODEX"]
+    assert woodex.feed_handlers == 1
+    assert (woodex.active, woodex.inactive, woodex.delisted, woodex.error) == (1, 0, 0, 0)
+    assert woodex.total_dead == 0
+    assert woodex.total == 1
+
+
+def test_summary_by_exchange_sorted_alphabetically() -> None:
+    results = _make_two_exchange_dataset()
+    by_ex = summary_by_exchange(results)
+    assert [s.exchange_name for s in by_ex] == sorted(s.exchange_name for s in by_ex)
+
+
+def test_summary_by_exchange_empty_returns_empty() -> None:
+    assert summary_by_exchange([]) == []
+
+
+def test_render_text_exchange_grouping_table_replaces_fh_table() -> None:
+    """With exchange_grouping=True, the per-FH table must be absent and the
+    per-exchange table must be present."""
+    results = _make_two_exchange_dataset()
+    out = io.StringIO()
+    render(results, "text", out, exchange_grouping=True)
+    text = out.getvalue()
+
+    assert "Summary by exchange:" in text
+    assert "Summary by feed handler:" not in text
+
+
+def test_render_text_default_grouping_keeps_fh_table() -> None:
+    """Without --exchange-grouping, the original per-FH table is rendered and
+    the per-exchange table is NOT."""
+    results = _make_two_exchange_dataset()
+    out = io.StringIO()
+    render(results, "text", out)
+    text = out.getvalue()
+
+    assert "Summary by feed handler:" in text
+    assert "Summary by exchange:" not in text
+
+
+def test_render_text_exchange_grouping_total_row_sums_correctly() -> None:
+    results = _make_two_exchange_dataset()
+    out = io.StringIO()
+    render(results, "text", out, exchange_grouping=True)
+    text = out.getvalue()
+
+    total_lines = [line for line in text.splitlines() if line.startswith("| TOTAL")]
+    assert len(total_lines) == 1
+    cells = [c.strip() for c in total_lines[0].strip("|").split("|")]
+    # exchange_name, feed_handlers, active, inactive, delisted, error, total_dead, total
+    # HUOBI: fh=2 act=3 in=1 del=1 err=1 dead=2 tot=6
+    # WOODEX: fh=1 act=1 in=0 del=0 err=0 dead=0 tot=1
+    # TOTAL: fh=3 act=4 in=1 del=1 err=1 dead=2 tot=7
+    assert cells == ["TOTAL", "3", "4", "1", "1", "1", "2", "7"]
+
+
+def test_render_text_suppress_details_skips_per_symbol_rows() -> None:
+    """suppress_details=True hides the per-FH detail block entirely (but the
+    summary table and global summary line are still emitted)."""
+    results = _make_two_exchange_dataset()
+    out = io.StringIO()
+    render(results, "text", out, exchange_grouping=True, suppress_details=True)
+    text = out.getvalue()
+
+    # The per-FH header line "[hostname] fh_name (exchange_name)" must be absent
+    assert "[TA-TKY-A-41_LOCAL]" not in text
+    assert "[TA-TKY-A-95_LOCAL]" not in text
+    # but the per-symbol DELISTED/INACTIVE/ERROR lines should also be absent
+    assert " DELISTED " not in text  # detail-row format has 2-space indent + status
+    assert " INACTIVE " not in text
+    # Summary table + global summary line should still be there
+    assert "Summary by exchange:" in text
+    assert "Summary:" in text
+
+
+def test_render_text_suppress_details_false_keeps_per_symbol_rows() -> None:
+    """When suppress_details=False (the default), per-symbol detail rows are
+    rendered even with --exchange-grouping (this is the file-output case)."""
+    results = _make_two_exchange_dataset()
+    out = io.StringIO()
+    render(
+        results,
+        "text",
+        out,
+        exchange_grouping=True,
+        suppress_details=False,
+    )
+    text = out.getvalue()
+
+    # Detail header for HUOBI/A-95 (which has the INACTIVE and ERROR rows)
+    assert "[TA-TKY-A-95_LOCAL] fh_huobi_4006 (HUOBI)" in text
+    # And the per-exchange summary table is still present
+    assert "Summary by exchange:" in text
+
+
+def test_render_json_ignores_exchange_grouping() -> None:
+    """JSON output must be untouched by --exchange-grouping (text-only flag)."""
+    results = _make_two_exchange_dataset()
+    out_json_default = io.StringIO()
+    out_json_with_flag = io.StringIO()
+    render(results, "json", out_json_default)
+    render(results, "json", out_json_with_flag, exchange_grouping=True, suppress_details=True)
+    assert out_json_default.getvalue() == out_json_with_flag.getvalue()
+
+
+def test_render_csv_ignores_exchange_grouping() -> None:
+    results = _make_two_exchange_dataset()
+    out_csv_default = io.StringIO()
+    out_csv_with_flag = io.StringIO()
+    render(results, "csv", out_csv_default)
+    render(results, "csv", out_csv_with_flag, exchange_grouping=True, suppress_details=True)
+    assert out_csv_default.getvalue() == out_csv_with_flag.getvalue()
+
+
+def test_exchange_summary_dataclass_basic() -> None:
+    """Just making sure the dataclass is importable and constructible."""
+    s = ExchangeSummary(
+        exchange_name="HUOBI",
+        feed_handlers=2,
+        active=3,
+        inactive=1,
+        delisted=1,
+        error=1,
+        total_dead=2,
+        total=6,
+    )
+    assert s.exchange_name == "HUOBI"
+    assert s.feed_handlers == 2

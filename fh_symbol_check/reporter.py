@@ -30,6 +30,26 @@ class FeedHandlerSummary:
     total_dead: int  # inactive + delisted
     total: int
 
+
+@dataclass(frozen=True)
+class ExchangeSummary:
+    """Per-exchange aggregate counts for the --exchange-grouping summary table.
+
+    Each row collapses every FH targeting the same ``exchange_name`` into one
+    line. ``feed_handlers`` is the count of distinct (hostname, fh_name) pairs
+    contributing to this exchange. Buckets are mutually exclusive:
+    active + inactive + delisted + error == total.
+    """
+
+    exchange_name: str
+    feed_handlers: int
+    active: int  # LISTED
+    inactive: int
+    delisted: int
+    error: int
+    total_dead: int  # inactive + delisted
+    total: int
+
 _CSV_FIELDS = [
     "service_id",
     "fh_name",
@@ -105,19 +125,61 @@ def summary_by_fh(results: list[SymbolResult]) -> list[FeedHandlerSummary]:
     return rows
 
 
+def summary_by_exchange(results: list[SymbolResult]) -> list[ExchangeSummary]:
+    """Aggregate results into one row per ``exchange_name``.
+
+    Sorted alphabetically by exchange_name for stable output. ``feed_handlers``
+    counts distinct ``(hostname, fh_name)`` pairs contributing to each exchange.
+    """
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    fh_keys: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for r in results:
+        counts[r.exchange_name][r.status] += 1
+        fh_keys[r.exchange_name].add((r.hostname, r.fh_name))
+
+    rows: list[ExchangeSummary] = []
+    for exchange_name in sorted(counts):
+        c = counts[exchange_name]
+        listed = c["LISTED"]
+        inactive = c["INACTIVE"]
+        delisted = c["DELISTED"]
+        error = c["ERROR"]
+        rows.append(
+            ExchangeSummary(
+                exchange_name=exchange_name,
+                feed_handlers=len(fh_keys[exchange_name]),
+                active=listed,
+                inactive=inactive,
+                delisted=delisted,
+                error=error,
+                total_dead=inactive + delisted,
+                total=listed + inactive + delisted + error,
+            )
+        )
+    return rows
+
+
 def render(
     results: list[SymbolResult],
     fmt: Format,
     stream: TextIO,
     *,
     show_listed: bool = False,
+    exchange_grouping: bool = False,
+    suppress_details: bool = False,
 ) -> None:
     if fmt == "json":
         _render_json(results, stream)
     elif fmt == "csv":
         _render_csv(results, stream)
     elif fmt == "text":
-        _render_text(results, stream, show_listed=show_listed)
+        _render_text(
+            results,
+            stream,
+            show_listed=show_listed,
+            exchange_grouping=exchange_grouping,
+            suppress_details=suppress_details,
+        )
     else:
         raise ValueError(f"unknown format: {fmt!r}")
 
@@ -135,36 +197,45 @@ def _render_csv(results: list[SymbolResult], stream: TextIO) -> None:
 
 
 def _render_text(
-    results: list[SymbolResult], stream: TextIO, *, show_listed: bool
+    results: list[SymbolResult],
+    stream: TextIO,
+    *,
+    show_listed: bool,
+    exchange_grouping: bool,
+    suppress_details: bool,
 ) -> None:
-    grouped: dict[tuple[str, str, str], list[SymbolResult]] = defaultdict(list)
-    for r in results:
-        grouped[(r.hostname, r.fh_name, r.exchange_name)].append(r)
+    if not suppress_details:
+        grouped: dict[tuple[str, str, str], list[SymbolResult]] = defaultdict(list)
+        for r in results:
+            grouped[(r.hostname, r.fh_name, r.exchange_name)].append(r)
 
-    printable_statuses = {"INACTIVE", "DELISTED", "ERROR"}
-    if show_listed:
-        printable_statuses.add("LISTED")
+        printable_statuses = {"INACTIVE", "DELISTED", "ERROR"}
+        if show_listed:
+            printable_statuses.add("LISTED")
 
-    any_printed = False
-    for key in sorted(grouped):
-        hostname, fh_name, exchange_name = key
-        rows = [r for r in grouped[key] if r.status in printable_statuses]
-        if not rows:
-            continue
-        any_printed = True
-        stream.write(f"\n[{hostname}] {fh_name} ({exchange_name})\n")
-        for r in rows:
-            line = f"  {r.status:<9} {r.original_symbol}"
-            if r.ccxt_symbol and r.ccxt_symbol != r.original_symbol:
-                line += f"  (ccxt={r.ccxt_symbol})"
-            if r.detail:
-                line += f"  -- {r.detail}"
-            stream.write(line + "\n")
+        any_printed = False
+        for key in sorted(grouped):
+            hostname, fh_name, exchange_name = key
+            rows = [r for r in grouped[key] if r.status in printable_statuses]
+            if not rows:
+                continue
+            any_printed = True
+            stream.write(f"\n[{hostname}] {fh_name} ({exchange_name})\n")
+            for r in rows:
+                line = f"  {r.status:<9} {r.original_symbol}"
+                if r.ccxt_symbol and r.ccxt_symbol != r.original_symbol:
+                    line += f"  (ccxt={r.ccxt_symbol})"
+                if r.detail:
+                    line += f"  -- {r.detail}"
+                stream.write(line + "\n")
 
-    if not any_printed:
-        stream.write("\nNo invalid symbols found.\n")
+        if not any_printed:
+            stream.write("\nNo invalid symbols found.\n")
 
-    _render_fh_summary_table(summary_by_fh(results), stream)
+    if exchange_grouping:
+        _render_exchange_summary_table(summary_by_exchange(results), stream)
+    else:
+        _render_fh_summary_table(summary_by_fh(results), stream)
 
     counts = summary(results)
     stream.write(
@@ -174,6 +245,53 @@ def _render_text(
         f"DELISTED={counts['DELISTED']} "
         f"ERROR={counts['ERROR']}\n"
     )
+
+
+def _render_psql_table(
+    *,
+    title: str,
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    totals_row: tuple[str, ...],
+    text_col_idx: tuple[int, ...],
+    stream: TextIO,
+) -> None:
+    """Render a psql-style box-drawn table with a separated totals row.
+
+    text_col_idx: indices of columns to left-align (everything else is
+    right-aligned as a numeric column).
+    """
+    if not rows:
+        return
+
+    widths = [
+        max(len(headers[i]), max(len(r[i]) for r in rows + [totals_row]))
+        for i in range(len(headers))
+    ]
+
+    def hline() -> str:
+        return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+    def fmt(row: tuple[str, ...]) -> str:
+        parts = []
+        for i, cell in enumerate(row):
+            padded = (
+                cell.ljust(widths[i])
+                if i in text_col_idx
+                else cell.rjust(widths[i])
+            )
+            parts.append(f" {padded} ")
+        return "|" + "|".join(parts) + "|"
+
+    stream.write(f"\n{title}:\n")
+    stream.write(hline() + "\n")
+    stream.write(fmt(headers) + "\n")
+    stream.write(hline() + "\n")
+    for row in rows:
+        stream.write(fmt(row) + "\n")
+    stream.write(hline() + "\n")
+    stream.write(fmt(totals_row) + "\n")
+    stream.write(hline() + "\n")
 
 
 def _render_fh_summary_table(
@@ -193,8 +311,6 @@ def _render_fh_summary_table(
         "total dead",
         "total",
     )
-    text_col_idx = (0, 1, 2)
-
     rows: list[tuple[str, ...]] = [
         (
             s.fh_name,
@@ -220,31 +336,60 @@ def _render_fh_summary_table(
         str(sum(s.total_dead for s in summaries)),
         str(sum(s.total for s in summaries)),
     )
-    widths = [
-        max(len(headers[i]), max(len(r[i]) for r in rows + [totals_row]))
-        for i in range(len(headers))
+    _render_psql_table(
+        title="Summary by feed handler",
+        headers=headers,
+        rows=rows,
+        totals_row=totals_row,
+        text_col_idx=(0, 1, 2),
+        stream=stream,
+    )
+
+
+def _render_exchange_summary_table(
+    summaries: list[ExchangeSummary], stream: TextIO
+) -> None:
+    if not summaries:
+        return
+
+    headers = (
+        "exchange_name",
+        "feed_handlers",
+        "active",
+        "inactive",
+        "delisted",
+        "error",
+        "total dead",
+        "total",
+    )
+    rows: list[tuple[str, ...]] = [
+        (
+            s.exchange_name,
+            str(s.feed_handlers),
+            str(s.active),
+            str(s.inactive),
+            str(s.delisted),
+            str(s.error),
+            str(s.total_dead),
+            str(s.total),
+        )
+        for s in summaries
     ]
-
-    def hline() -> str:
-        return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-
-    def fmt(row: tuple[str, ...]) -> str:
-        parts = []
-        for i, cell in enumerate(row):
-            padded = (
-                cell.ljust(widths[i])
-                if i in text_col_idx
-                else cell.rjust(widths[i])
-            )
-            parts.append(f" {padded} ")
-        return "|" + "|".join(parts) + "|"
-
-    stream.write("\nSummary by feed handler:\n")
-    stream.write(hline() + "\n")
-    stream.write(fmt(headers) + "\n")
-    stream.write(hline() + "\n")
-    for row in rows:
-        stream.write(fmt(row) + "\n")
-    stream.write(hline() + "\n")
-    stream.write(fmt(totals_row) + "\n")
-    stream.write(hline() + "\n")
+    totals_row: tuple[str, ...] = (
+        "TOTAL",
+        str(sum(s.feed_handlers for s in summaries)),
+        str(sum(s.active for s in summaries)),
+        str(sum(s.inactive for s in summaries)),
+        str(sum(s.delisted for s in summaries)),
+        str(sum(s.error for s in summaries)),
+        str(sum(s.total_dead for s in summaries)),
+        str(sum(s.total for s in summaries)),
+    )
+    _render_psql_table(
+        title="Summary by exchange",
+        headers=headers,
+        rows=rows,
+        totals_row=totals_row,
+        text_col_idx=(0,),
+        stream=stream,
+    )

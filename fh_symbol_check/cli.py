@@ -20,7 +20,7 @@ from .db import DBError, fetch_feed_handlers
 from .exchange_map import ExchangeMapError, load_exchange_map
 from .logging_config import setup_logging
 from .reporter import keep_fhs_with_errors, render, summary
-from .validator import build_tasks, classify_symbols
+from .validator import build_tasks, classify_symbols, filter_by_symbol
 
 logger = logging.getLogger("fh_symbol_check")
 
@@ -62,6 +62,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--symbol",
+        default=None,
+        help=(
+            "Find all occurrences of this exact symbol across the scanned "
+            "feed handlers. Case-sensitive; matched against both the FH "
+            "symbol (cover_names value) AND the translated venue symbol. "
+            "Used alone, implies --all. Combines with --hostname / "
+            "--exchange-name / --errors-only / --exchange-grouping. When "
+            "set, LISTED rows are auto-included in text output so every "
+            "occurrence is visible."
+        ),
+    )
+    p.add_argument(
         "--output",
         choices=["text", "json", "csv"],
         default="text",
@@ -85,6 +98,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Filter the report (text/JSON/CSV) to feed handlers that have at "
             "least one ERROR row. Does not affect the summary log line or the "
             "exit code, which still reflect the full run."
+        ),
+    )
+    p.add_argument(
+        "--exchange-grouping",
+        action="store_true",
+        help=(
+            "Text output only: replace the per-feed-handler summary table "
+            "with a per-exchange one. Per-symbol detail rows are suppressed "
+            "on stdout (use --output-file to keep them in the written file). "
+            "Has no effect on JSON/CSV output."
         ),
     )
     p.add_argument(
@@ -149,13 +172,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.all and (args.hostname or args.exchange_name):
         parser.error("--all cannot be combined with --hostname or --exchange-name")
-    if not args.all and not args.hostname and not args.exchange_name:
-        parser.error("specify --hostname, --exchange-name, or --all")
+    if not (args.all or args.hostname or args.exchange_name or args.symbol):
+        parser.error("specify --hostname, --exchange-name, --symbol, or --all")
 
     level = "DEBUG" if args.verbose else args.log_level
     setup_logging(level)
 
-    filter_desc = _describe_filters(args.hostname, args.exchange_name)
+    filter_desc = _describe_filters(args.hostname, args.exchange_name, args.symbol)
     logger.info("filter: %s", filter_desc)
 
     try:
@@ -184,6 +207,23 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("no fh_config rows matched filters (%s)", filter_desc)
 
     tasks, early_errors = build_tasks(rows, exchange_map)
+
+    if args.symbol:
+        before_tasks = len(tasks)
+        before_errors = len(early_errors)
+        tasks, early_errors = filter_by_symbol(tasks, early_errors, args.symbol)
+        logger.info(
+            "--symbol %r: matched %d/%d task(s) and %d/%d unmappable-exchange error(s)",
+            args.symbol,
+            len(tasks), before_tasks,
+            len(early_errors), before_errors,
+        )
+        if not tasks and not early_errors:
+            logger.warning(
+                "--symbol %r: 0 occurrences found in the scanned FH set",
+                args.symbol,
+            )
+
     results = early_errors + classify_symbols(tasks, concurrency=args.concurrency)
 
     counts = summary(results)
@@ -202,9 +242,21 @@ def main(argv: list[str] | None = None) -> int:
             len(rendered),
         )
 
+    suppress_details = args.exchange_grouping and args.output_file is None
+    # --symbol turns the tool into a search; every occurrence should be
+    # visible regardless of status, so auto-enable show_listed.
+    effective_show_listed = args.show_listed or bool(args.symbol)
+
     try:
         with _open_output(args.output_file) as stream:
-            render(rendered, args.output, stream, show_listed=args.show_listed)
+            render(
+                rendered,
+                args.output,
+                stream,
+                show_listed=effective_show_listed,
+                exchange_grouping=args.exchange_grouping,
+                suppress_details=suppress_details,
+            )
     except OSError as e:
         logger.error("failed to write report: %s", e)
         return EXIT_OPERATIONAL_FAILURE
@@ -215,12 +267,18 @@ def main(argv: list[str] | None = None) -> int:
     return EXIT_OK
 
 
-def _describe_filters(hostname: str | None, exchange_name: str | None) -> str:
+def _describe_filters(
+    hostname: str | None,
+    exchange_name: str | None,
+    symbol: str | None = None,
+) -> str:
     parts: list[str] = []
     if hostname:
         parts.append(f"hostname LIKE %{hostname}%")
     if exchange_name:
         parts.append(f"exchange_name={exchange_name!r}")
+    if symbol:
+        parts.append(f"symbol={symbol!r}")
     return ", ".join(parts) if parts else "ALL (no filters)"
 
 

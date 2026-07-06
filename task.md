@@ -142,6 +142,33 @@ Tick items as they complete. New tasks may be appended as the project progresses
 - [x] Confirmed FH stores `<BASE>/USD-PERP` style (`BNB/USD-PERP`, `ETH/USD-PERP`, …) while Nado expects `<BASE>-PERP`
 - [x] Added `_translate_perp_strip_quote` (`BTC/USD-PERP` → `BTC-PERP`); registered for `NADO`; covered by 8-case parametrised test + dispatch test + registry-contents check (9 new tests, 90 total)
 
+## Phase 7h — `--symbol` lookup
+
+- [x] New CLI flag `--symbol <STR>` to find every occurrence of an exact symbol across the scanned FH set
+- [x] Match semantics: **case-sensitive, full-string equality**, checked against both `original_symbol` (FH/cover_names form) AND `ccxt_symbol` (translated venue form) — caller can pass either form
+- [x] New `filter_by_symbol(tasks, errors, symbol)` in `validator.py`; applied after `build_tasks` but before `classify_symbols` so we skip wasted `load_markets` calls on tasks we'd throw away
+- [x] Mutually-permissive: `--symbol` alone is enough (implies `--all`); composes with `--hostname` / `--exchange-name` / `--errors-only` / `--exchange-grouping`. The `--all` vs `--hostname/--exchange-name` exclusivity is preserved
+- [x] Validation gate widened to "specify --hostname, --exchange-name, --symbol, or --all" (one of the four required)
+- [x] Auto-enable `--show-listed` in text output when `--symbol` is set (the tool is being used as a search — every occurrence should be visible regardless of status)
+- [x] INFO log line: `--symbol 'X': matched N/M task(s) and K/J unmappable-exchange error(s)`; WARNING line if 0 occurrences found
+- [x] `_describe_filters` updated to include the `symbol=…` slug
+- [x] 8 new pytest cases in `test_validator.py`: matches original side, matches ccxt side, case-sensitivity respected, exact-not-substring, unmappable errors filtered too, no-match returns empty, no mutation of inputs, same-symbol-on-multiple-FHs all survive
+- [x] New `tests/test_cli.py` (11 cases) locking down argparse-level acceptance of `--symbol` in all permitted combinations + preservation of the pre-existing `--all`-exclusivity rules
+- [x] README: Example 14 added with stdout / FH-form / ccxt-form / combinations, plus CLI reference row + updated "at least one of" line
+- [x] Gates clean: ruff, mypy, 153 pytest
+
+## Phase 7g — `--exchange-grouping` summary
+
+- [x] New CLI flag `--exchange-grouping` (text-only): replaces the per-FH summary table with a per-exchange one
+- [x] `ExchangeSummary` dataclass (`exchange_name`, `feed_handlers`, `active`, `inactive`, `delisted`, `error`, `total_dead`, `total`); `feed_handlers` counts distinct `(hostname, fh_name)` pairs
+- [x] `summary_by_exchange(results)` aggregator, sorted alphabetically for stable output
+- [x] Per-symbol detail block is suppressed when `--exchange-grouping` is set AND `--output-file` is **not** set (clean stdout for fleet stats, full detail when writing to file for triage)
+- [x] JSON/CSV unaffected (verified by tests asserting identical output with/without the flag)
+- [x] Table-rendering core extracted into a shared `_render_psql_table` helper; both `_render_fh_summary_table` and the new `_render_exchange_summary_table` go through it (eliminates the duplicated box-drawing logic)
+- [x] 11 new pytest cases (aggregation, sort order, suppress-details on/off, JSON/CSV unaffected, totals row arithmetic, replacement-not-augmentation, empty input)
+- [x] README: Example 14 added (with both stdout and `--output-file` forms) + CLI reference table row
+- [x] Gates clean: ruff, mypy, 134 pytest
+
 ## Phase 7f — Remaining `*DM` translators (BITGETDM / WHITEBITDM / CRYPTOCOMDM / KRAKENDM)
 
 - [x] Probed each ccxt id to learn the venue shape:

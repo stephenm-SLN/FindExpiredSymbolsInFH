@@ -96,6 +96,32 @@ def build_tasks(
     return tasks, errors
 
 
+def filter_by_symbol(
+    tasks: list[ResolvedTask],
+    errors: list[SymbolResult],
+    symbol: str,
+) -> tuple[list[ResolvedTask], list[SymbolResult]]:
+    """Keep only tasks/errors whose ``original_symbol`` OR ``ccxt_symbol``
+    equals ``symbol``.
+
+    Match is **case-sensitive** and exact (full string equality). Both sides
+    are checked so the caller can pass either the FH-internal form
+    (``IP/USDT-PERP``) or the translated venue form (``IP/USDT:USDT``) and
+    get the same row back.
+
+    Returns a new (tasks, errors) pair; the inputs are not mutated.
+    """
+    matched_tasks = [
+        t for t in tasks
+        if t.original_symbol == symbol or t.ccxt_symbol == symbol
+    ]
+    matched_errors = [
+        e for e in errors
+        if e.original_symbol == symbol or e.ccxt_symbol == symbol
+    ]
+    return matched_tasks, matched_errors
+
+
 def classify_symbols(
     tasks: Iterable[ResolvedTask],
     *,
