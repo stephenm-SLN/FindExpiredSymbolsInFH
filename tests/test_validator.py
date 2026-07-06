@@ -4,7 +4,8 @@ import pytest
 
 import fh_symbol_check.validator as validator_module
 from fh_symbol_check.models import FeedHandlerRow
-from fh_symbol_check.validator import build_tasks, classify_symbols
+from fh_symbol_check.models import ResolvedTask, SymbolResult
+from fh_symbol_check.validator import build_tasks, classify_symbols, filter_by_symbol
 
 
 def _row(exchange_name: str, symbols: tuple[str, ...], svc: int = 4002) -> FeedHandlerRow:
@@ -194,3 +195,122 @@ def test_classify_custom_venue_case_insensitive_lookup(
     results = classify_symbols(tasks, concurrency=1)
 
     assert results[0].status == "LISTED"
+
+
+# ---------------------------------------------------------------------------
+# --symbol filter (filter_by_symbol)
+# ---------------------------------------------------------------------------
+
+
+def _task(original: str, *, ccxt_symbol: str | None = None, ccxt_id: str = "binance") -> ResolvedTask:
+    return ResolvedTask(
+        service_id=4001,
+        fh_name="fh_test_4001",
+        hostname="TA-TKY-A-41_LOCAL",
+        exchange_name="BINANCE",
+        ccxt_id=ccxt_id,
+        original_symbol=original,
+        ccxt_symbol=ccxt_symbol if ccxt_symbol is not None else original,
+    )
+
+
+def _err(original: str, *, ccxt_symbol: str = "") -> SymbolResult:
+    return SymbolResult(
+        service_id=4001,
+        fh_name="fh_unknown_4001",
+        hostname="TA-TKY-A-41_LOCAL",
+        exchange_name="UNKNOWNEX",
+        ccxt_id="",
+        original_symbol=original,
+        ccxt_symbol=ccxt_symbol,
+        status="ERROR",
+        detail="unknown exchange_name='UNKNOWNEX'; add it to exchange_mapping.yaml",
+    )
+
+
+def test_filter_by_symbol_matches_original_side() -> None:
+    tasks = [
+        _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
+        _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
+    ]
+    matched_tasks, matched_errors = filter_by_symbol(tasks, [], "IP/USDT-PERP")
+    assert [t.original_symbol for t in matched_tasks] == ["IP/USDT-PERP"]
+    assert matched_errors == []
+
+
+def test_filter_by_symbol_matches_ccxt_side() -> None:
+    """User passes the translated venue form; we should still match the row."""
+    tasks = [
+        _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
+        _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
+    ]
+    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT:USDT")
+    assert [t.original_symbol for t in matched_tasks] == ["IP/USDT-PERP"]
+
+
+def test_filter_by_symbol_is_case_sensitive() -> None:
+    """We promised case-sensitive exact matching; `IP/USDT-Perp` must NOT match `IP/USDT-PERP`."""
+    tasks = [_task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT")]
+    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT-Perp")
+    assert matched_tasks == []
+
+
+def test_filter_by_symbol_exact_only_not_substring() -> None:
+    """`IP/USDT` must NOT match `1000IP/USDT-PERP` or `IP/USDT-PERP` \u2014 it's a full-string equality."""
+    tasks = [
+        _task("1000IP/USDT-PERP", ccxt_symbol="1000IP/USDT:USDT"),
+        _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
+    ]
+    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT")
+    assert matched_tasks == []
+
+
+def test_filter_by_symbol_filters_unmappable_errors_too() -> None:
+    """The early-errors list (unmappable exchange_name) is also filtered so
+    `--symbol X --exchange-name UNKNOWNEX` still surfaces X's ERROR row."""
+    errors = [
+        _err("IP/USDT-PERP"),
+        _err("BTC/USDT-PERP"),
+    ]
+    _, matched_errors = filter_by_symbol([], errors, "IP/USDT-PERP")
+    assert [e.original_symbol for e in matched_errors] == ["IP/USDT-PERP"]
+
+
+def test_filter_by_symbol_no_match_returns_empty() -> None:
+    tasks = [_task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT")]
+    errors = [_err("ETH/USDT-PERP")]
+    matched_tasks, matched_errors = filter_by_symbol(tasks, errors, "DOGE/USDT-PERP")
+    assert matched_tasks == [] and matched_errors == []
+
+
+def test_filter_by_symbol_does_not_mutate_inputs() -> None:
+    tasks = [_task("IP/USDT-PERP"), _task("BTC/USDT-PERP")]
+    errors = [_err("IP/USDT-PERP")]
+    tasks_before = list(tasks)
+    errors_before = list(errors)
+    _ = filter_by_symbol(tasks, errors, "IP/USDT-PERP")
+    assert tasks == tasks_before
+    assert errors == errors_before
+
+
+def test_filter_by_symbol_keeps_all_fhs_for_that_symbol() -> None:
+    """The same symbol on multiple FHs should all survive the filter."""
+    tasks = [
+        ResolvedTask(
+            service_id=4001, fh_name="fh_a", hostname="host-a",
+            exchange_name="BINANCE", ccxt_id="binance",
+            original_symbol="IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT",
+        ),
+        ResolvedTask(
+            service_id=4002, fh_name="fh_b", hostname="host-b",
+            exchange_name="BYBIT", ccxt_id="bybit",
+            original_symbol="IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT",
+        ),
+        ResolvedTask(
+            service_id=4003, fh_name="fh_c", hostname="host-c",
+            exchange_name="HUOBI", ccxt_id="htx",
+            original_symbol="OTHER/USDT", ccxt_symbol="OTHER/USDT",
+        ),
+    ]
+    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT-PERP")
+    assert {t.fh_name for t in matched_tasks} == {"fh_a", "fh_b"}

@@ -4,30 +4,37 @@ Concrete "how" — files, signatures, libraries, CLI shape, exit codes. Assumes 
 
 ## 1. Files to Create / Modify
 
-### Create
+### Create (all done)
 | Path | Purpose |
 |---|---|
 | `find_expired_symbols.py` | Thin CLI entry point (`from fh_symbol_check.cli import main; sys.exit(main())`). |
-| `exchange_mapping.yaml` | DB `exchange_name` → ccxt id. Code-tracked. Seed: `HUOBI: htx`, `WOODEX: woo`. |
+| `exchange_mapping.yaml` | DB `exchange_name` → ccxt id. Code-tracked. See file for the full mapping. |
 | `fh_symbol_check/__init__.py` | Empty package marker. |
-| `fh_symbol_check/cli.py` | Argparse + orchestration + exit code. |
+| `fh_symbol_check/cli.py` | Argparse + orchestration + exit code; filter / report / behaviour / config arg groups. |
 | `fh_symbol_check/creds.py` | `load_creds(path, section)`, `DBCreds`, `CredsError`. |
-| `fh_symbol_check/db.py` | `fetch_feed_handlers(creds, hostname_pattern)`, `FeedHandlerRow`, `DBError`. |
+| `fh_symbol_check/db.py` | `fetch_feed_handlers(creds, hostname_pattern=None, *, exchange_name=None)`, `FeedHandlerRow`, `DBError`. |
 | `fh_symbol_check/exchange_map.py` | `load_exchange_map(path)`, `resolve(mapping, exchange_name)`, `ExchangeMapError`. |
-| `fh_symbol_check/symbol_translation.py` | Per-ccxt-id `TRANSLATORS` registry + `translate(ccxt_id, symbol)`. |
-| `fh_symbol_check/models.py` | `ResolvedTask`, `SymbolResult`, `SymbolStatus`. |
-| `fh_symbol_check/validator.py` | `build_tasks(rows, mapping)`, `classify_symbols(tasks, concurrency)`. |
-| `fh_symbol_check/reporter.py` | `render(results, fmt, stream, show_listed)`, `summary(results)`. |
+| `fh_symbol_check/symbol_translation.py` | Per-`exchange_name` `TRANSLATORS` registry + `translate(exchange_name, symbol)` + the `_translate_*` primitives. |
+| `fh_symbol_check/models.py` | `FeedHandlerRow`, `ResolvedTask`, `SymbolResult`, `SymbolStatus`. |
+| `fh_symbol_check/validator.py` | `build_tasks`, `filter_by_symbol`, `classify_symbols` (with custom-venue dispatch via `_classify_custom_venue`). |
+| `fh_symbol_check/reporter.py` | `render`, `summary`, `summary_by_fh`, `summary_by_exchange`, `keep_fhs_with_errors`, `FeedHandlerSummary`, `ExchangeSummary`. |
 | `fh_symbol_check/logging_config.py` | `setup_logging(level)`. |
+| `fh_symbol_check/custom_venues/__init__.py` | `CUSTOM_VENUES` registry, `is_custom_venue`, `custom_id_for`, `get_checker`, `CUSTOM_VENUE_PREFIX`. |
+| `fh_symbol_check/custom_venues/nado.py` | Nado checker (`fetch_symbols()`), `User-Agent`-spoofed `urllib`. |
+| `fh_symbol_check/custom_venues/polymarket_perps.py` | Polymarket Perps checker (`fetch_symbols()`), same shape. |
 | `tests/__init__.py` | Empty. |
-| `tests/test_creds.py` | YAML load by section; password-mask in repr. |
-| `tests/test_db.py` | Parameterised SQL assertions (cursor stubbed). |
-| `tests/test_exchange_map.py` | Load + case-insensitive lookup. |
-| `tests/test_symbol_translation.py` | `woo` rule + identity default. |
-| `tests/test_validator.py` | LISTED / INACTIVE / DELISTED / ERROR classification. |
-| `tests/test_reporter.py` | text / json / csv shapes. |
-| `.vscode/launch.json` | Python debug config with `--hostname TA-TKY-A-41` example. |
-| `README.md` (short) | Install (pixi), run, creds & mapping location, exit codes. |
+| `tests/conftest.py` | Ensure workspace root is on `sys.path`. |
+| `tests/test_creds.py` | YAML load by section; password-mask in repr; password absent from `caplog.text`. |
+| `tests/test_db.py` | Stubbed `pymysql.connect`; dynamic-WHERE composition for all combinations of `hostname` / `exchange_name`. |
+| `tests/test_exchange_map.py` | Load + case-insensitive lookup; YAML errors → `ExchangeMapError`. |
+| `tests/test_symbol_translation.py` | Every registered translator primitive + dispatch tests for every key in `TRANSLATORS`. |
+| `tests/test_validator.py` | LISTED / INACTIVE / DELISTED / ERROR classification (ccxt path); custom-venue dispatch; `filter_by_symbol` exhaustive cases. |
+| `tests/test_reporter.py` | text / json / csv shapes; per-FH and per-exchange summary tables; `--errors-only` filter; suppress-details behaviour; JSON/CSV invariance under text-only flags. |
+| `tests/test_cli.py` | Argparse-level flag acceptance + the validation gates (`--all` exclusivity, "at least one of" requirement). |
+| `tests/test_custom_venues_nado.py` | Nado parser + `fetch_symbols` mocking. |
+| `tests/test_custom_venues_polymarket_perps.py` | Polymarket Perps parser + `fetch_symbols` mocking. |
+| `.vscode/launch.json` | Python debug configs. |
+| `README.md` | User-facing docs: install (pixi), run, creds & mapping location, CLI reference, examples, exit codes. |
 
 ### Modify (each via a diff I will post in chat for sign-off first)
 | Path | Change | Rationale |
@@ -40,28 +47,48 @@ Concrete "how" — files, signatures, libraries, CLI shape, exit codes. Assumes 
 ## 2. CLI Interface
 
 ```
-$ python find_expired_symbols.py --help
+$ pixi run python find_expired_symbols.py --help
 
-usage: find_expired_symbols.py --hostname HOSTNAME [options]
+usage: find_expired_symbols.py [options]
 
-Required:
-  --hostname HOSTNAME           Hostname substring for the SQL LIKE filter
-                                (e.g. TA-TKY-A-41). No default.
+Filter args (at least one is required):
+  --hostname STRING             Hostname substring for the SQL LIKE filter
+                                (e.g. TA-TKY-A-41). Bound as a parameter.
+  --exchange-name STRING        Case-insensitive exact match against
+                                fh_config.exchange_name (e.g. BINANCE).
+  --symbol STRING               Find every occurrence of this exact symbol.
+                                Case-sensitive; matched against both the FH
+                                form (cover_names) and the translated venue
+                                form. Used alone implies --all.
+  --all                         Scan every fh_config row (no filters).
+                                Mutually exclusive with --hostname and
+                                --exchange-name.
 
-Output:
+Report-shaping args:
   --output {text,json,csv}      Report format (default: text).
   --output-file PATH            Write report to PATH instead of stdout.
-  --show-listed                 Include LISTED rows in text output (default: omit).
+  --show-listed                 Include LISTED rows in text output. Auto-
+                                enabled when --symbol is set.
+  --errors-only                 Filter the report to feed handlers that
+                                have at least one ERROR row. Does not
+                                change the summary log line or exit code.
+  --exchange-grouping           Text only: replace the per-FH summary
+                                table with a per-exchange one; suppress
+                                per-symbol detail on stdout (kept when
+                                writing to --output-file). No effect on
+                                JSON / CSV.
 
 Behaviour:
   --concurrency N               Max parallel exchanges (default: 4).
-  --fail-on-invalid             Exit 1 when any DELISTED/INACTIVE found (default).
-  --no-fail-on-invalid          Always exit 0 unless an operational error occurs.
+  --fail-on-invalid             Exit 1 when any DELISTED/INACTIVE found
+                                (default).
+  --no-fail-on-invalid          Always exit 0 unless an operational error.
 
 Config:
   --creds-file PATH             Credentials YAML (default: ./.DBCreds.yaml).
   --creds-section NAME          Section in the creds YAML (default: crypto_db).
-  --exchange-map PATH           Exchange-name → ccxt-id map (default: ./exchange_mapping.yaml).
+  --exchange-map PATH           Exchange-name → ccxt-id map (default:
+                                ./exchange_mapping.yaml).
 
 Diagnostics:
   --log-level {DEBUG,INFO,WARNING,ERROR}   Default INFO.
@@ -135,7 +162,12 @@ class FeedHandlerRow:
 
 class DBError(Exception): ...
 
-def fetch_feed_handlers(creds: DBCreds, hostname_pattern: str) -> list[FeedHandlerRow]: ...
+def fetch_feed_handlers(
+    creds: DBCreds,
+    hostname_pattern: str | None = None,
+    *,
+    exchange_name: str | None = None,
+) -> list[FeedHandlerRow]: ...
 ```
 
 ```python
@@ -149,10 +181,40 @@ def resolve(mapping: dict[str, str], exchange_name: str) -> str | None: ...
 ```python
 # fh_symbol_check/symbol_translation.py
 Translator = Callable[[str], str]
-TRANSLATORS: dict[str, Translator] = {"woo": _translate_woo}
 
-def translate(ccxt_id: str, internal_symbol: str) -> str: ...
-def _translate_woo(s: str) -> str: ...   # "1000BONK/USDC-PERP" -> "1000BONK/USDC:USDC"
+# Keyed by FH `exchange_name` (uppercase). Missing entries default to identity.
+TRANSLATORS: dict[str, Translator] = {
+    "BINANCEDM": _translate_perp_suffix,
+    "BINANCEDMCOIN": _translate_perp_suffix_inverse,
+    "BITGETDM": _translate_perp_by_quote,
+    "BYBITDM": _translate_perp_by_quote,
+    "NADO": _translate_perp_strip_quote,
+    "POLYMARKETPERPS": _translate_polymarketperps,
+    # ... see source for the full list
+}
+
+def translate(exchange_name: str, internal_symbol: str) -> str: ...
+def _translate_perp_suffix(s: str) -> str: ...           # linear:  BTC/USDT-PERP -> BTC/USDT:USDT
+def _translate_perp_suffix_inverse(s: str) -> str: ...   # inverse: BTC/USD-PERP  -> BTC/USD:BTC
+def _translate_perp_by_quote(s: str) -> str: ...         # linear OR inverse by quote (BYBITDM, BITGETDM)
+def _translate_perp_strip_quote(s: str) -> str: ...      # BTC/USD-PERP -> BTC-PERP (NADO)
+def _translate_polymarketperps(s: str) -> str: ...       # GOLD/USDC-PERP -> GOLD-USD (+ WTI -> WTIOIL remap)
+```
+
+```python
+# fh_symbol_check/custom_venues/__init__.py
+CustomVenueChecker = Callable[[], Mapping[str, bool]]
+
+CUSTOM_VENUES: dict[str, CustomVenueChecker] = {
+    "NADO": nado.fetch_symbols,
+    "POLYMARKETPERPS": polymarket_perps.fetch_symbols,
+}
+
+CUSTOM_VENUE_PREFIX = "custom:"
+
+def is_custom_venue(exchange_name: str) -> bool: ...
+def custom_id_for(exchange_name: str) -> str: ...   # "NADO" -> "custom:NADO"
+def get_checker(custom_id: str) -> CustomVenueChecker: ...
 ```
 
 ```python
@@ -161,7 +223,16 @@ def build_tasks(
     rows: Iterable[FeedHandlerRow],
     exchange_map: dict[str, str],
 ) -> tuple[list[ResolvedTask], list[SymbolResult]]:
-    ...
+    """Routes custom venues first (sentinel ccxt_id = 'custom:<NAME>'),
+    then exchange_map; unknown exchange_names become ERROR rows."""
+
+def filter_by_symbol(
+    tasks: list[ResolvedTask],
+    errors: list[SymbolResult],
+    symbol: str,
+) -> tuple[list[ResolvedTask], list[SymbolResult]]:
+    """Keep only tasks/errors where original_symbol OR ccxt_symbol == symbol.
+    Case-sensitive, full-string equality."""
 
 def classify_symbols(
     tasks: Iterable[ResolvedTask],
@@ -172,15 +243,43 @@ def classify_symbols(
 
 ```python
 # fh_symbol_check/reporter.py
+@dataclass(frozen=True)
+class FeedHandlerSummary:
+    fh_name: str
+    hostname: str
+    exchange_name: str
+    active: int       # LISTED
+    inactive: int
+    delisted: int
+    error: int
+    total_dead: int   # inactive + delisted
+    total: int
+
+@dataclass(frozen=True)
+class ExchangeSummary:
+    exchange_name: str
+    feed_handlers: int   # distinct (hostname, fh_name) pairs
+    active: int
+    inactive: int
+    delisted: int
+    error: int
+    total_dead: int
+    total: int
+
 def render(
     results: list[SymbolResult],
     fmt: Literal["text", "json", "csv"],
     stream: TextIO,
     *,
     show_listed: bool = False,
+    exchange_grouping: bool = False,
+    suppress_details: bool = False,
 ) -> None: ...
 
 def summary(results: list[SymbolResult]) -> dict[SymbolStatus, int]: ...
+def summary_by_fh(results: list[SymbolResult]) -> list[FeedHandlerSummary]: ...
+def summary_by_exchange(results: list[SymbolResult]) -> list[ExchangeSummary]: ...
+def keep_fhs_with_errors(results: list[SymbolResult]) -> list[SymbolResult]: ...
 ```
 
 ```python
@@ -188,10 +287,10 @@ def summary(results: list[SymbolResult]) -> dict[SymbolStatus, int]: ...
 def main(argv: list[str] | None = None) -> int: ...
 ```
 
-## 5. Helper-Script Refactors (approved — diffs go through review first)
+## 5. Helper-Script Refactors (completed)
 
 ### 5.1 `check_delisted_symbol.py`
-Add (above existing functions):
+Added (above existing functions):
 ```python
 class MarketLoadError(Exception): ...
 
@@ -213,8 +312,8 @@ def classify(markets: dict, symbol: str) -> tuple[str, str]:
         return "INACTIVE", "market.active is False"
     return "LISTED", ""
 ```
-Update existing functions:
-- `load_exchange_markets` → call `load_exchange_markets_safe`, catch `MarketLoadError`, print + `sys.exit(1)` (CLI behaviour preserved).
+Updated existing functions:
+- `load_exchange_markets` → calls `load_exchange_markets_safe`, catches `MarketLoadError`, print + `sys.exit(1)` (CLI behaviour preserved).
 - `check_symbol` / `check_multiple` → call `classify(markets, symbol)`; printing unchanged.
 
 ### 5.2 `mysql_select_query.py`
@@ -230,20 +329,20 @@ Targeted changes only:
       cursor.execute(query, params) if params is not None else cursor.execute(query)
       ...
   ```
-- Replace the `__main__` block to read `.DBCreds.yaml` (section `crypto_db`) — no hard-coded creds remain anywhere in the helper.
-
-I will post both diffs in chat for sign-off before applying.
+- Replaced the `__main__` block to read `.DBCreds.yaml` (section `crypto_db`) — no hard-coded creds remain anywhere in the helper.
 
 ## 6. Libraries
 
 | Library | Why | Source |
 |---|---|---|
 | `pymysql` | Already used by helper; supports parameterised queries. | conda-forge / pypi |
-| `ccxt` | Used by helper; authoritative for "is symbol listed". | pypi |
+| `ccxt` | Used by helper; authoritative for "is symbol listed" for ccxt-backed venues. | pypi |
 | `pyyaml` | YAML creds + exchange map. | conda-forge / pypi |
+| `urllib` (stdlib) | HTTP for custom-venue checkers (Nado, Polymarket Perps). | stdlib |
 | `pytest` | Tests. | dev only |
-| `mypy` (optional) | Type-check new package. | dev only |
-| `ruff` (optional) | Lint new package. | dev only |
+| `mypy` | Type-check new package; gate. | dev only |
+| `ruff` | Lint new package; gate. | dev only |
+| `types-PyYAML`, `types-PyMySQL` | mypy stubs. | dev only |
 
 Compatible-release ranges (`pymysql>=1.1`, `ccxt>=4`, `pyyaml>=6`). No exact pins unless `pixi.lock` forces it.
 
@@ -296,18 +395,24 @@ logging.basicConfig(
 
 | # | Check | Command |
 |---|---|---|
-| 1 | Tool runs end-to-end | `python find_expired_symbols.py --hostname TA-TKY-A-41` |
-| 2 | JSON is valid | `python find_expired_symbols.py --hostname TA-TKY-A-41 --output json --no-fail-on-invalid \| python -m json.tool >/dev/null` |
-| 3 | CSV header correct | `python find_expired_symbols.py --hostname TA-TKY-A-41 --output csv --no-fail-on-invalid \| head -n1` |
-| 4 | Empty result | `python find_expired_symbols.py --hostname does-not-exist`  → exit 0, empty report |
-| 5 | Bad creds | rename creds file → exit 2, no password in stderr |
-| 6 | No literal creds in new code | `rg -n 'ToTheMoon\|*%r4#j9z' fh_symbol_check find_expired_symbols.py` → no matches |
-| 7 | Parameterised SQL | `rg -n "f\"SELECT" fh_symbol_check/db.py` → no matches; `cursor.execute(sql, (param,))` present |
-| 8 | Creds git-ignored | `git check-ignore .DBCreds.yaml` → ignored |
-| 9 | Mapping NOT git-ignored | `git check-ignore exchange_mapping.yaml` → empty (i.e. tracked) |
+| 1 | Tool runs end-to-end (host filter) | `pixi run python find_expired_symbols.py --hostname TA-TKY-A-41` |
+| 2 | `--all` works (no host/exchange filter) | `pixi run python find_expired_symbols.py --all` |
+| 3 | `--exchange-name` filters at the DB level | `pixi run python find_expired_symbols.py --exchange-name BINANCE` |
+| 4 | `--symbol` finds every occurrence (implies `--all`) | `pixi run python find_expired_symbols.py --symbol IP/USDT-PERP` |
+| 5 | `--exchange-grouping` swaps the summary table | `pixi run python find_expired_symbols.py --all --exchange-grouping` |
+| 6 | JSON is valid | `pixi run python find_expired_symbols.py --all --output json --no-fail-on-invalid \| python -m json.tool >/dev/null` |
+| 7 | CSV header correct | `pixi run python find_expired_symbols.py --all --output csv --no-fail-on-invalid \| head -n1` |
+| 8 | Empty result | `pixi run python find_expired_symbols.py --hostname does-not-exist` → exit 0, empty report |
+| 9 | Bad creds | rename creds file → exit 2, no password in stderr |
+| 10 | No literal creds in new code | `rg -n '<password literal>' fh_symbol_check find_expired_symbols.py` → no matches |
+| 11 | Parameterised SQL | `rg -n "f\"SELECT" fh_symbol_check/db.py` → no matches; `cursor.execute(sql, (param,))` present |
+| 12 | Creds git-ignored | `git check-ignore .DBCreds.yaml` → ignored |
+| 13 | Mapping NOT git-ignored | `git check-ignore exchange_mapping.yaml` → empty (i.e. tracked) |
+| 14 | Gates clean | `pixi run -e dev ruff check . && pixi run -e dev mypy fh_symbol_check && pixi run -e dev pytest -q` |
 
 ## 10. Out-of-Scope Reminders
 - No persistent caching across runs.
 - No FH config mutation.
 - No remote scheduling.
-- No auto-detection of translation rules — explicitly registered per ccxt id.
+- No auto-detection of translation rules — explicitly registered per FH `exchange_name`.
+- No auto-discovery of custom-venue endpoints — each is hand-written in `custom_venues/<venue>.py` against the venue's documented API.

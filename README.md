@@ -282,6 +282,79 @@ pixi run python find_expired_symbols.py \
     --exchange-map ./mapping-overrides.yaml
 ```
 
+### Example 14 — find every occurrence of a specific symbol
+
+Locate one symbol across the entire fleet (handy when you suspect a single
+ticker is misbehaving or you want to know which FHs subscribe to it):
+
+```bash
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP
+```
+
+When used alone, `--symbol` implies `--all`, so the scan covers every FH.
+The match is **case-sensitive and exact** (full-string equality), checked
+against both the FH-side value (the `cover_names` entry, e.g.
+`IP/USDT-PERP`) and the translated venue-side value (e.g. `IP/USDT:USDT`).
+This means you can pass either form and the lookup just works:
+
+```bash
+pixi run python find_expired_symbols.py --symbol "IP/USDT:USDT"   # ccxt form
+pixi run python find_expired_symbols.py --symbol "IP/USDT-PERP"   # FH form
+```
+
+When `--symbol` is set, LISTED rows are auto-included in the text report
+\u2014 the tool is being used as a search, so every occurrence (LISTED,
+INACTIVE, DELISTED, ERROR) is shown.
+
+Combines naturally with the existing filter flags:
+
+```bash
+# Narrow to a single host
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --hostname TA-TKY-A-41
+
+# Narrow to a single exchange
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --exchange-name BINANCE
+
+# Per-exchange roll-up of where the symbol lives
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --exchange-grouping
+
+# Only surface FHs where the symbol is broken
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --errors-only
+```
+
+If no FH carries the symbol, you get a single WARNING line and an empty
+report rather than an error.
+
+### Example 15 — per-exchange roll-up across the fleet
+
+For a fleet-wide health check across many feed handlers, collapse the
+per-FH summary into a per-exchange one:
+
+```bash
+pixi run python find_expired_symbols.py --all --exchange-grouping
+```
+
+The per-symbol detail block is suppressed on stdout (you're looking at
+fleet stats, not individual rows), and the summary table changes from
+`fh_name | hostname | exchange_name | …` to `exchange_name |
+feed_handlers | active | inactive | delisted | error | total dead |
+total`. The `feed_handlers` column counts distinct `(hostname, fh_name)`
+pairs reporting under each exchange.
+
+To keep the per-symbol detail for triage, also pass `--output-file`:
+
+```bash
+pixi run python find_expired_symbols.py \
+    --all --exchange-grouping --output-file fleet-report.txt
+```
+
+The on-screen summary table is unchanged, but the written file also
+contains every `INACTIVE` / `DELISTED` / `ERROR` row grouped by feed
+handler so you can drill in.
+
+`--exchange-grouping` is a **text-only** flag — JSON and CSV output are
+unaffected and continue to emit one row per symbol.
+
 ---
 
 ## Sample output
@@ -381,10 +454,12 @@ service_id,fh_name,hostname,exchange_name,ccxt_id,internal_symbol,ccxt_symbol,st
 | `--hostname <STR>`                    | —                        | Substring matched via `hostname LIKE %<STR>%`                                            |
 | `--exchange-name <STR>`               | —                        | Case-insensitive exact match against `fh_config.exchange_name`                           |
 | `--all`                               | off                      | Scan every row; mutually exclusive with `--hostname` / `--exchange-name`                 |
+| `--symbol <STR>`                      | —                        | Find every occurrence of this exact symbol (case-sensitive, matched against both FH and venue forms). Used alone implies `--all`; combines with the other filters. Auto-enables `--show-listed` in text output |
 | `--output {text,json,csv}`            | `text`                   | Report format                                                                            |
 | `--output-file <PATH>`                | stdout                   | Write report here instead of stdout                                                      |
 | `--show-listed`                       | off                      | Include `LISTED` rows in the text report                                                 |
 | `--errors-only`                       | off                      | Filter report to feed handlers with at least one `ERROR` row (log + exit code unchanged) |
+| `--exchange-grouping`                 | off                      | Text only: replace the per-FH summary table with a per-exchange one; suppresses the per-symbol detail block on stdout unless `--output-file` is also set |
 | `--concurrency <N>`                   | `4`                      | Max parallel ccxt exchanges (one `load_markets` per exchange, shared across its symbols) |
 | `--fail-on-invalid` / `--no-fail-on-invalid` | `--fail-on-invalid` | Exit 1 when any `DELISTED` / `INACTIVE` row is present                                   |
 | `--creds-file <PATH>`                 | `./.DBCreds.yaml`        | Credentials YAML                                                                         |
@@ -393,8 +468,9 @@ service_id,fh_name,hostname,exchange_name,ccxt_id,internal_symbol,ccxt_symbol,st
 | `--log-level {DEBUG,INFO,WARNING,ERROR}` | `INFO`                | Log level                                                                                |
 | `-v`, `--verbose`                     | off                      | Shortcut for `--log-level DEBUG`                                                         |
 
-At least one of `--hostname`, `--exchange-name`, or `--all` is required;
-omitting all three is rejected by `argparse` (exit 2).
+At least one of `--hostname`, `--exchange-name`, `--symbol`, or `--all` is
+required; omitting all four is rejected by `argparse` (exit 2). `--symbol`
+on its own implies `--all` for the host/exchange scan.
 
 ## Exit codes
 
