@@ -1,0 +1,34 @@
+# Shared pixi workspace for multi-user installs on a Linux server.
+#
+# Copy this file to /opt/find-expired-symbols/pixi.toml on the server,
+# next to the built wheel. See ../deploy.md for the full runbook.
+#
+# When bumping the wheel version, update the `path = ...` reference below
+# to match the new versioned filename (or keep a stable-name symlink).
+
+[workspace]
+name = "find-expired-symbols"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = ">=3.11,<3.14"
+
+[pypi-dependencies]
+# Local wheel produced by `pixi run -e dev python -m build --wheel` on
+# the dev box and scp'd next to this pixi.toml.
+find-expired-symbols = { path = "./find_expired_symbols-0.1.0-py3-none-any.whl" }
+
+# Default `find-expired-symbols` task. Prefills the shared DB creds path
+# so end users only have to type filter/report flags. Anything they add
+# on the command line is appended by pixi:
+#
+#   pixi run find-expired-symbols --symbol TON/USDT-PERP
+#     ↓ pixi expands to:
+#   find-expired-symbols --creds-file /etc/find-expired-symbols/DBCreds.yaml --symbol TON/USDT-PERP
+#
+# argparse takes the *last* value for duplicated flags, so users can
+# still override with their own `--creds-file /path/to/other.yaml`.
+[tasks]
+find-expired-symbols = "find-expired-symbols --creds-file /etc/find-expired-symbols/DBCreds.yaml"

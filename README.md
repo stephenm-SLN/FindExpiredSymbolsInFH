@@ -29,6 +29,7 @@ Output is text (with a per-feed-handler summary table), JSON, or CSV.
 - [How statuses are determined](#how-statuses-are-determined)
 - [How symbol translation works](#how-symbol-translation-works)
 - [Adding a new exchange](#adding-a-new-exchange)
+- [Deploying on a Linux server](#deploying-on-a-linux-server)
 - [Development](#development)
 - [Project layout](#project-layout)
 - [Troubleshooting](#troubleshooting)
@@ -81,12 +82,18 @@ Notes:
 - The file is matched by `.DBCreds.*` in `.gitignore`; do not remove that rule.
 - Connection errors are wrapped in `DBError` and exit with code 2.
 
-### `exchange_mapping.yaml` (tracked in git)
+### `exchange_mapping.yaml` (tracked in git, shipped inside the wheel)
 
 Maps the uppercase `exchange_name` stored in `fh_config` to the lowercase
-`ccxt` exchange id. Unknown exchange names appear as `ERROR` rows in the
-report. The shipped file currently maps 45 FH exchange names, including
-the full Binance family used in the examples below:
+`ccxt` exchange id. Lives at `fh_symbol_check/data/exchange_mapping.yaml`
+and is bundled inside the wheel as package data — the installed
+`find-expired-symbols` command picks it up automatically (resolved via
+`importlib.resources`), so operators do not need to keep a separate
+copy on the server. Override with `--exchange-map /path/to/custom.yaml`
+if you need to point at a local, out-of-tree file. Unknown exchange
+names appear as `ERROR` rows in the report. The shipped file currently
+maps 45 FH exchange names, including the full Binance family used in
+the examples below:
 
 ```yaml
 APEX: apex
@@ -655,6 +662,77 @@ In `SymbolResult` output, custom-venue rows carry `ccxt_id="custom:<NAME>"`
 (e.g. `custom:NADO`) so downstream consumers can tell where the
 classification came from.
 
+## Deploying on a Linux server
+
+The project is a real pip-installable package. The recommended deploy
+pattern on a shared server is a single **pixi workspace** at
+`/opt/find-expired-symbols/` that both interactive users and any
+scheduler share:
+
+```bash
+cd /opt/find-expired-symbols
+pixi run find-expired-symbols --symbol TON/USDT-PERP
+```
+
+> **For the full step-by-step runbook — including the pixi-based
+> Python bootstrap for servers whose system Python is missing `venv`
+> or is too old, the shared-task `pixi.toml`, multi-user permissions,
+> and scheduler wiring — see [`deploy.md`](deploy.md).** The short
+> pip-into-a-venv path below still works for single-user hosts.
+
+```bash
+# Fresh venv (one-time)
+python3 -m venv /opt/find-expired-symbols/venv
+/opt/find-expired-symbols/venv/bin/pip install --upgrade pip
+
+# Install from a git checkout on the server ...
+/opt/find-expired-symbols/venv/bin/pip install /path/to/checkout
+
+# ... or straight from the internal git remote (no checkout needed)
+/opt/find-expired-symbols/venv/bin/pip install \
+    'git+ssh://git@github.com/stephenm-SLN/FindExpiredSymbolsInFH.git@main'
+```
+
+The wheel bundles `fh_symbol_check/data/exchange_mapping.yaml`, so the
+console script's `--exchange-map` default is populated automatically.
+The only file the operator still has to provide is the DB credential
+file:
+
+```bash
+# Secret \u2014 keep it outside the repo and chmod 600
+sudo install -d -m 700 /etc/find-expired-symbols
+sudo cp .DBCreds.yaml   /etc/find-expired-symbols/DBCreds.yaml
+sudo chmod 600           /etc/find-expired-symbols/DBCreds.yaml
+```
+
+Then any scheduler (Airflow, Jenkins, cron, systemd timers, …) can
+invoke it like a normal shell command:
+
+```bash
+/opt/find-expired-symbols/venv/bin/find-expired-symbols \
+    --creds-file /etc/find-expired-symbols/DBCreds.yaml \
+    --all \
+    --output json \
+    --output-file /var/log/find-expired-symbols/$(date +%F).json
+```
+
+Exit codes (see [Exit codes](#exit-codes)) are stable and safe to key
+alerting off of:
+
+- `0` = clean run, nothing invalid found
+- `1` = ran successfully, but reported at least one non-`LISTED` symbol
+- `2` = operational failure (bad creds, DB down, malformed mapping, …)
+- `130` = interrupted (SIGINT)
+
+If the host has `pixi` available you can equivalently keep a git
+checkout and run `pixi run python find_expired_symbols.py …` — both
+invocation styles go through the exact same code path (`run()` in
+`fh_symbol_check.cli`).
+
+To upgrade to a new version, `pip install --upgrade` the same target
+inside the same venv; the bundled `exchange_mapping.yaml` is refreshed
+automatically as part of the install.
+
 ## Development
 
 ```bash
@@ -674,9 +752,11 @@ common filter modes.
 
 ```
 .
-├── find_expired_symbols.py     # thin CLI entry point
+├── pyproject.toml              # packaging metadata + console script entry point
+├── pixi.toml                   # dev environment (osx-arm64 + linux-64)
+├── find_expired_symbols.py     # source-checkout entry point (delegates to run())
 ├── fh_symbol_check/            # package with the actual logic
-│   ├── cli.py                  # argparse + orchestration
+│   ├── cli.py                  # argparse + orchestration + run() console entry
 │   ├── creds.py                # .DBCreds.yaml loader + DBCreds dataclass
 │   ├── db.py                   # fetch_feed_handlers(...)
 │   ├── exchange_map.py         # exchange_mapping.yaml loader + resolve()
@@ -685,12 +765,13 @@ common filter modes.
 │   ├── reporter.py             # text/json/csv rendering + summary table
 │   ├── logging_config.py
 │   ├── models.py               # dataclasses (FeedHandlerRow, SymbolResult, ...)
+│   ├── data/
+│   │   └── exchange_mapping.yaml  # tracked; ships inside the wheel as package data
 │   └── custom_venues/          # non-ccxt venue checkers (NADO, POLYMARKETPERPS, …)
 │       ├── __init__.py         # CUSTOM_VENUES registry + sentinel helpers
 │       ├── nado.py             # archive.prod.nado.xyz /v2/symbols client
 │       └── polymarket_perps.py # api.perpetuals.polymarket.com /v1/info/instruments client
-├── tests/                      # pytest suite
-├── exchange_mapping.yaml       # tracked
+├── tests/                      # pytest suite (includes test_packaging.py)
 ├── .DBCreds.yaml               # git-ignored (you create this)
 ├── check_delisted_symbol.py    # reusable helper; also has its own CLI
 ├── mysql_select_query.py       # reusable MySQL client

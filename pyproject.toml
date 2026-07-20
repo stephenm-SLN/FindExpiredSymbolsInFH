@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "find-expired-symbols"
+version = "0.1.0"
+description = "Report Feed Handler symbols that are no longer listed on their exchange (ccxt + custom-venue backed)."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+authors = [
+    {name = "stephenm-SLN", email = "stephen.m@selinicapital.com"},
+]
+license = {text = "Proprietary"}
+keywords = ["feed-handler", "ccxt", "symbol-validation", "delisted"]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pymysql>=1.1",
+    "ccxt>=4",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+find-expired-symbols = "fh_symbol_check.cli:run"
+
+# The two top-level helpers (`check_delisted_symbol.py`,
+# `mysql_select_query.py`) live at the repo root but are imported by
+# `fh_symbol_check`; declaring them as py-modules ships them in the wheel
+# without needing to move the source files.
+[tool.setuptools]
+py-modules = ["check_delisted_symbol", "mysql_select_query"]
+
+[tool.setuptools.packages.find]
+include = ["fh_symbol_check*"]
+exclude = ["tests*", ".pixi*"]
+
+# `exchange_mapping.yaml` is code-tracked config (not a secret), so it
+# ships inside the wheel and the console script picks it up by default.
+# Operators can still override via `--exchange-map /path/to/custom.yaml`.
+[tool.setuptools.package-data]
+fh_symbol_check = ["data/*.yaml"]

@@ -2,7 +2,7 @@
 authors = ["stephenm-SLN <stephen.m@selinicapital.com>"]
 channels = ["conda-forge"]
 name = "FindExpiredSymbolsInFH"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [pypi-options]
@@ -27,6 +27,7 @@ ruff = "*"
 [feature.dev.pypi-dependencies]
 types-PyYAML = "*"
 types-PyMySQL = "*"
+build = "*"
 
 [environments]
 dev = ["dev"]

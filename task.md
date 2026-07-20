@@ -213,7 +213,48 @@ If real runs show DELISTED rows for any of these venues, paste 3 sample FH symbo
   - `api.prod.polymarketexchange.com` (docs.polymarket.us) uses kebab-case structured ids (`ewc-ushse-…-2026-11-03`)
   - User indicated there is an FH-side local mapping table (`DEMWINHOUSE2026` → real polymarket slug/condition-id). Resuming this needs that table + a decision on which downstream endpoint to validate against. Until then, POLYMARKETINT rows will surface as ERROR.
 
-## Phase 8 — Suggested follow-ups (not in this iteration)
+## Phase 8 — Packaging as a pip-installable console script
+
+Ship the tool as a real Python package so operators can `pip install` it
+into a venv on a Linux server and get a `find-expired-symbols` command
+on `$PATH`. External schedulers (Airflow, Jenkins, cron, systemd timers)
+invoke it like any other shell command.
+
+- [x] Moved `exchange_mapping.yaml` → `fh_symbol_check/data/exchange_mapping.yaml` (ships inside the wheel as package data; kept out of `pip install` boilerplate on the server).
+- [x] Added `DEFAULT_EXCHANGE_MAP` in `fh_symbol_check/cli.py`; resolves via `importlib.resources.files("fh_symbol_check")` so both source-tree and installed-wheel invocations pick up the same file.
+- [x] Added `--exchange-map` default = `DEFAULT_EXCHANGE_MAP` (operator can still override with an explicit path). Also removed the hard-coded `prog="find_expired_symbols.py"` so argparse infers program name from `sys.argv[0]` — installed users see `find-expired-symbols`, source-tree users still see `find_expired_symbols.py`.
+- [x] Added `run() -> int` in `fh_symbol_check/cli.py` that wraps `main()` with KeyboardInterrupt (→ exit `130`) and generic exception (→ exit `2`, `logger.exception`) handling. Both invocation styles go through it.
+- [x] Simplified `find_expired_symbols.py` to a 3-line wrapper around `fh_symbol_check.cli.run`.
+- [x] Created `pyproject.toml`:
+  - `[build-system]` setuptools + wheel
+  - `[project]` metadata (name `find-expired-symbols`, `requires-python = ">=3.10,<3.14"`, runtime deps `pymysql`/`ccxt`/`pyyaml`)
+  - `[project.scripts]` → `find-expired-symbols = fh_symbol_check.cli:run`
+  - `[tool.setuptools] py-modules = ["check_delisted_symbol", "mysql_select_query"]` (top-level helpers ship alongside the package)
+  - `[tool.setuptools.packages.find]` including `fh_symbol_check*`, excluding `tests*`
+  - `[tool.setuptools.package-data] fh_symbol_check = ["data/*.yaml"]`
+- [x] Added `linux-64` to `pixi.toml` `platforms` so the pixi env resolves on the target Linux host too.
+- [x] `tests/test_packaging.py` — 5 smoke checks:
+  - `run` is importable and is the exact callable pyproject points at
+  - `--help` succeeds and mentions every filter flag operators depend on
+  - `DEFAULT_EXCHANGE_MAP` exists on disk, lives inside `fh_symbol_check`, and is at `data/exchange_mapping.yaml`
+  - the bundled mapping loads as a `{str: str}` YAML dict
+  - exit-code constants are frozen at `0/1/2/130`
+- [x] End-to-end smoke on real wheel:
+  - `python -m build --wheel` produces `find_expired_symbols-0.1.0-py3-none-any.whl` (includes `fh_symbol_check/data/exchange_mapping.yaml`)
+  - `pip install <wheel>` into a fresh venv installs the `find-expired-symbols` console script
+  - `find-expired-symbols --help` works from any cwd
+  - `DEFAULT_EXCHANGE_MAP` points at `<venv>/lib/python3.13/site-packages/fh_symbol_check/data/exchange_mapping.yaml` (not the source tree)
+  - `>=3.10` guard correctly rejects Python 3.9
+- [x] README "Deploying on a Linux server" section — venv install (from checkout or from `git+ssh://…`), where to place `DBCreds.yaml`, external-scheduler invocation recipe, exit-code reference, upgrade path.
+- [x] Full gate re-run: 163 tests passing (158 pre-packaging + 5 new), `ruff check .` clean, `mypy fh_symbol_check tests` clean.
+
+Deferred (documented, out of scope for v1):
+
+- [ ] Publish wheel to the Nexus PyPI mirror (`https://nexus.selini.tech/repository/pypi-hosted/simple`) so `pip install find-expired-symbols` works without a git remote — user picked "cross that bridge later" for the update flow.
+- [ ] CI job to build + publish the wheel on tag.
+- [ ] Ship a systemd `.service` + `.timer` example — user is scheduling externally (Airflow/Jenkins/etc.), so this isn't in v1.
+
+## Phase 9 — Suggested follow-ups (not in this iteration)
 
 Tracked here so they don't get lost:
 

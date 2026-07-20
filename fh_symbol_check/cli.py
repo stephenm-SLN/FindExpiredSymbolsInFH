@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 from typing import TextIO
 
@@ -29,10 +30,17 @@ EXIT_INVALID_FOUND = 1
 EXIT_OPERATIONAL_FAILURE = 2
 EXIT_INTERRUPT = 130
 
+# The packaged exchange_mapping.yaml. Ships inside the wheel; resolves to the
+# in-tree copy when running from a source checkout (both cases land on the
+# same on-disk file since setuptools installs unzipped by default). Users can
+# still override with `--exchange-map /path/to/custom.yaml`.
+DEFAULT_EXCHANGE_MAP: Path = Path(
+    str(_pkg_files("fh_symbol_check").joinpath("data/exchange_mapping.yaml"))
+)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="find_expired_symbols.py",
         description=(
             "Pull symbols configured in the Feed Handlers and report any that "
             "are no longer valid (delisted/inactive) on their exchange. Filter "
@@ -146,8 +154,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--exchange-map",
         type=Path,
-        default=Path("exchange_mapping.yaml"),
-        help="Exchange-name -> ccxt-id map (default: ./exchange_mapping.yaml).",
+        default=DEFAULT_EXCHANGE_MAP,
+        help=(
+            "Exchange-name -> ccxt-id map (default: bundled "
+            "`fh_symbol_check/data/exchange_mapping.yaml`, resolved via "
+            "importlib.resources)."
+        ),
     )
 
     p.add_argument(
@@ -302,3 +314,20 @@ class _OutputCtx:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._close:
             self._stream.close()
+
+
+def run() -> int:
+    """Console-script entry point.
+
+    Wraps :func:`main` with a KeyboardInterrupt handler and a catch-all
+    exception guard so callers (systemd, cron, Airflow, ad-hoc SSH) always
+    see a documented exit code rather than a Python traceback.
+    """
+    try:
+        return main()
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return EXIT_INTERRUPT
+    except Exception:
+        logger.exception("unhandled exception")
+        return EXIT_OPERATIONAL_FAILURE
