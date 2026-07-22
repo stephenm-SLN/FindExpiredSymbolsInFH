@@ -53,8 +53,8 @@ installed tool: absolute path + CLI flags + exit code.
 - TCP reachability to the FH MySQL host.
 - **Not required:** a working system Python, system `pip`, deploy-key
   SSH access to GitHub, or root — everything below is user-scoped
-  except two `sudo mkdir`s under `/opt` and setting group ownership on
-  `/etc/find-expired-symbols`.
+  except two `sudo mkdir`s under `/opt` and setting group ownership
+  on the shared install directory and its DB creds file.
 
 ---
 
@@ -195,14 +195,22 @@ That's the absolute path the scheduler will use in Part 9.
 
 The wheel bundles `exchange_mapping.yaml` (code-tracked config), so
 the **only** file the operator has to provide by hand is
-`DBCreds.yaml`. It's a secret — keep it out of your dotfiles, config-
-management systems, and shell history.
+`.DBCreds.yaml`. It lives **inside the install workspace** at
+`/opt/find-expired-symbols/.DBCreds.yaml` — the same convention as
+the dev repo, where `.DBCreds.yaml` sits next to `find_expired_symbols.py`.
+Everything the deploy needs is under a single tree.
 
-```bash
-sudo install -d -m 750 /etc/find-expired-symbols
-```
+> **Non-standard install locations** (e.g. per-user install under
+> `/home/<user>/opt/find-expired-symbols/`) work out of the box: the
+> shipped `[tasks]` line uses `$PIXI_PROJECT_ROOT/.DBCreds.yaml`, which
+> pixi expands to the pixi.toml's directory at task run-time. Just drop
+> the creds file next to the workspace's `pixi.toml` and the task
+> Just Works — no editing required.
 
-Create `/etc/find-expired-symbols/DBCreds.yaml` via your normal
+The file is a secret — keep it out of dotfiles, config-management
+systems, and shell history.
+
+Create `/opt/find-expired-symbols/.DBCreds.yaml` via your normal
 secret-injection process. Content shape:
 
 ```yaml
@@ -213,13 +221,14 @@ crypto_db:
   password: <password>
 ```
 
-Then set restrictive permissions (see the next section for the group
-choice):
+Verify it landed:
 
 ```bash
-sudo chmod 640 /etc/find-expired-symbols/DBCreds.yaml
-ls -l /etc/find-expired-symbols/DBCreds.yaml
+ls -l /opt/find-expired-symbols/.DBCreds.yaml
 ```
+
+Permissions on it are set in the next section (Part 6), after the
+blanket chmod pass that would otherwise make it world-readable.
 
 ---
 
@@ -245,14 +254,13 @@ sudo find /opt/find-expired-symbols -type f -exec chmod 644 {} \;
 sudo find /opt/find-expired-symbols/.pixi/envs/default/bin -type f \
     -exec chmod 755 {} \;
 
-# DB creds — group-readable to $FES_GROUP only
-sudo chown "root:$FES_GROUP" /etc/find-expired-symbols
-sudo chown "root:$FES_GROUP" /etc/find-expired-symbols/DBCreds.yaml
-sudo chmod 750 /etc/find-expired-symbols
-sudo chmod 640 /etc/find-expired-symbols/DBCreds.yaml
+# DB creds — the blanket chmod above made it 644 (world-readable),
+# which would leak the password. Lock it back down to group-only.
+sudo chown "root:$FES_GROUP" /opt/find-expired-symbols/.DBCreds.yaml
+sudo chmod 640                /opt/find-expired-symbols/.DBCreds.yaml
 
 # Sanity check as a non-owner user (if you can `su`)
-su -c 'cat /etc/find-expired-symbols/DBCreds.yaml >/dev/null && echo ok' <other-user>
+su -c 'cat /opt/find-expired-symbols/.DBCreds.yaml >/dev/null && echo ok' <other-user>
 ```
 
 **How this maps to the two invocation styles:**
@@ -262,8 +270,16 @@ su -c 'cat /etc/find-expired-symbols/DBCreds.yaml >/dev/null && echo ok' <other-
   installed workspace is a read-only operation.
 - The scheduler (whatever user it runs as) needs read/execute on
   `/opt/find-expired-symbols/.pixi/envs/default/bin/` and read on
-  `/etc/find-expired-symbols/DBCreds.yaml`. Make sure the scheduler
+  `/opt/find-expired-symbols/.DBCreds.yaml`. Make sure the scheduler
   user is in `$FES_GROUP`.
+
+> **Order matters:** create the DB creds file (Part 5) **before**
+> running the permissions block. If you set permissions first and
+> then create the file, it'll be chmod 600 (the default of most
+> editors on RHEL), owned by you — the wrong ownership and group for
+> multi-user access. Either follow the parts in order, or re-run the
+> two DB-creds lines above after any secret-injection step that
+> replaces the file.
 
 ---
 
@@ -353,7 +369,7 @@ scheduler doesn't need to know about pixi.
 set -eu
 
 FES=/opt/find-expired-symbols/.pixi/envs/default/bin/find-expired-symbols
-CREDS=/etc/find-expired-symbols/DBCreds.yaml
+CREDS=/opt/find-expired-symbols/.DBCreds.yaml
 OUTDIR=/var/log/find-expired-symbols
 mkdir -p "$OUTDIR"
 
@@ -381,7 +397,7 @@ Airflow: `BashOperator` with the block above; `retries=0` on exit 2
 Jenkins: freestyle job; if you want exit 1 to be a non-failing
 warning, wrap with `sh -c '<cmd>; ec=$?; [ $ec -le 1 ] || exit $ec'`.
 
-Cron: `0 */6 * * * /opt/find-expired-symbols/.pixi/envs/default/bin/find-expired-symbols --creds-file /etc/find-expired-symbols/DBCreds.yaml --all --output json --output-file /var/log/find-expired-symbols/$(date -u +\%FT\%H).json 2>&1 | logger -t find-expired-symbols`
+Cron: `0 */6 * * * /opt/find-expired-symbols/.pixi/envs/default/bin/find-expired-symbols --creds-file /opt/find-expired-symbols/.DBCreds.yaml --all --output json --output-file /var/log/find-expired-symbols/$(date -u +\%FT\%H).json 2>&1 | logger -t find-expired-symbols`
 
 **Log rotation** — the JSON files accumulate. Drop a `logrotate`
 snippet at `/etc/logrotate.d/find-expired-symbols`:
@@ -438,18 +454,18 @@ reinstalled against the new Python automatically.
 
 ## Part 11 — Uninstall / rollback
 
-Because everything the tool touches lives in three well-known
-locations, uninstall is trivial:
+Because everything the tool touches lives in a small set of well-
+known locations, uninstall is trivial:
 
 ```bash
-# The install itself
+# The install itself — this also removes .DBCreds.yaml since it lives
+# inside the workspace. If you plan to reinstall, back the creds up
+# first (or leave the parent dir alone and just delete .pixi/ + the
+# wheel).
 sudo rm -rf /opt/find-expired-symbols
 
 # The wrapper (if you added Part 7)
 sudo rm -f /usr/local/bin/find-expired-symbols
-
-# The credential file
-sudo rm -rf /etc/find-expired-symbols
 
 # Log output (if you want it gone)
 sudo rm -rf /var/log/find-expired-symbols
@@ -476,8 +492,10 @@ Symptoms we hit on the real deploy and how to fix them:
 | Fresh venv install → `Package 'find-expired-symbols' requires a different Python: 3.7.16 not in '<3.14,>=3.10'` | The system Python was too old.                                                                    | This runbook doesn't use the system Python at all — the shared workspace pulls its interpreter from conda-forge. If you see this, you're following an older recipe. |
 | `python -m venv <path>` → `No module named venv`                                                    | System Python was shipped without the `venv` stdlib module.                                        | Same as above — this runbook sidesteps `python -m venv` entirely. Pixi's conda-forge Python has the full stdlib.       |
 | `pixi run find-expired-symbols` fails for another user with a permission error on `.pixi/`          | The install tree isn't group/other readable, or missing +x on binaries.                            | Rerun the Part 6 permissions block. Verify with `namei -l /opt/find-expired-symbols/.pixi/envs/default/bin/find-expired-symbols` as the failing user. |
-| `pixi run find-expired-symbols` for another user fails with `creds error: file not found`           | `DBCreds.yaml` isn't readable by the user's group.                                                | Check `id <user>` includes `$FES_GROUP` and that the file is `640 root:<$FES_GROUP>`.                                   |
+| `pixi run find-expired-symbols` for another user fails with `creds error: file not found`           | `.DBCreds.yaml` isn't readable by the user's group.                                               | Check `id <user>` includes `$FES_GROUP` and that `/opt/find-expired-symbols/.DBCreds.yaml` is `640 root:<$FES_GROUP>`.  |
 | `pixi run` wants to re-solve / re-download on someone else's account and fails on write to `.pixi/` | Something changed the lockfile after the initial `pixi install`.                                  | As the install owner: run `pixi install` once to freshen the env. Users can also pass `--frozen` (`pixi run --frozen find-expired-symbols …`) to skip the up-to-date check. |
+| `pixi install` fails with `Wheel: cryptography-<ver>-cp3xx-abi3-manylinux_2_28_x86_64.whl doesn't match this systems virtual capabilities for tags: cp3xx-cp3xx-manylinux_2_26_x86_64 ...` | The conda-forge Python pixi installed advertises `manylinux_2_26` as its top-supported wheel tag; recent `cryptography` PyPI wheels require `manylinux_2_28`. `ccxt` pulls `cryptography` in transitively, so the resolver hits it even though we never use signed endpoints. | Declare `cryptography = "*"` under `[dependencies]` in `/opt/find-expired-symbols/pixi.toml` so it's fetched from conda-forge (the shipped `deploy/shared-workspace-pixi.toml` already does this). Then `rm pixi.lock && pixi install`. Conda-forge cryptography is compiled against the same glibc as the conda-forge Python, so there's no manylinux mismatch, and pixi's conda↔pypi name mapping recognises it as satisfying ccxt's transitive requirement. **Do not** move `ccxt` itself to `[dependencies]` — there's no `conda-forge::ccxt` package, so `pixi install` will fail with `No candidates were found for ccxt >=4`. |
+| `pixi install` fails with `No candidates were found for ccxt >=4` | `ccxt` was placed under `[dependencies]` (conda-forge), but there's no conda-forge build for it. | Move `ccxt = ">=4"` back to `[pypi-dependencies]` (or just remove it entirely — the find-expired-symbols wheel declares it as a runtime dep, so pixi will pull it from PyPI via the wheel's own metadata). The shipped template does the latter. |
 | Everything worked yesterday; today the console script fails with `interpreter not found`           | `/opt/pyhost` was moved or deleted; nothing directly, but the shared workspace's cached conda env still trusts the world it was built in. | Restore `/opt/pyhost` (rerun Part 3), then `pixi install` in `/opt/find-expired-symbols`.                              |
 
 For anything not on this list, rerun the failing invocation with
@@ -498,6 +516,7 @@ exited.
 ├── pixi.toml                                         # workspace + tasks + wheel path
 ├── pixi.lock                                         # regenerated by `pixi install`
 ├── find_expired_symbols-<version>-py3-none-any.whl   # the wheel
+├── .DBCreds.yaml                                     # 640 root:$FES_GROUP, operator-provided
 └── .pixi/envs/default/
     ├── bin/
     │   ├── find-expired-symbols                      # ← scheduler calls this by absolute path
@@ -516,13 +535,11 @@ exited.
 
 /usr/local/bin/find-expired-symbols                   # optional wrapper (Part 7)
 
-/etc/find-expired-symbols/
-└── DBCreds.yaml                                      # 640 root:$FES_GROUP, operator-provided
-
 /var/log/find-expired-symbols/
 └── <timestamp>.json                                  # scheduler-produced output
 ```
 
-Four independent concerns (bootstrap Python, install workspace,
-credentials, output). Blowing away any one of them affects only that
-concern.
+Three independent concerns (bootstrap Python, install workspace
+— which now also holds the DB creds — and scheduler output). Blowing
+away any one of them affects only that concern; the workspace is
+self-contained.

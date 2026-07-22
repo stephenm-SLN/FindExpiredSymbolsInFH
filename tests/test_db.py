@@ -4,7 +4,7 @@ import pytest
 
 import fh_symbol_check.db as db_module
 from fh_symbol_check.creds import DBCreds
-from fh_symbol_check.db import DBError, fetch_feed_handlers
+from fh_symbol_check.db import DBError, fetch_feed_handlers, fetch_repeaters
 
 
 class _FakeClient:
@@ -119,6 +119,7 @@ def test_parses_cover_names_into_symbols(patched_client: type[_FakeClient]) -> N
     assert r.hostname == "TA-TKY-A-41_LOCAL"
     assert r.exchange_name == "HUOBI"
     assert r.symbols == ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+    assert r.source == "fh"
 
 
 def test_empty_cover_names_yields_empty_symbols(
@@ -137,3 +138,70 @@ def test_db_errors_wrapped(patched_client: type[_FakeClient]) -> None:
     patched_client.raise_on_query = RuntimeError("connection refused")
     with pytest.raises(DBError, match="failed to query fh_config"):
         fetch_feed_handlers(_creds(), "TA-TKY-A-41")
+
+
+# --- repeater_feeds ---------------------------------------------------------
+
+
+def test_repeaters_uses_repeater_feeds_table(
+    patched_client: type[_FakeClient],
+) -> None:
+    fetch_repeaters(_creds())
+    sql = patched_client.last_query
+    assert sql is not None
+    assert "crypto_db.repeater_feeds" in sql
+    assert "hostname, app_name, exchange_name, instruments" in sql
+    assert "WHERE" not in sql
+    assert patched_client.last_params is None
+
+
+def test_repeaters_filters_bound_same_as_fh(
+    patched_client: type[_FakeClient],
+) -> None:
+    fetch_repeaters(_creds(), "TA-TKY-A-41", exchange_name="BINANCE")
+    sql = patched_client.last_query
+    assert sql is not None
+    assert "hostname LIKE %s" in sql
+    assert "UPPER(exchange_name) = UPPER(%s)" in sql
+    assert "TA-TKY-A-41" not in sql
+    assert "BINANCE" not in sql
+    assert patched_client.last_params == ("%TA-TKY-A-41%", "BINANCE")
+
+
+def test_repeaters_parses_instruments_csv_and_stamps_source(
+    patched_client: type[_FakeClient],
+) -> None:
+    patched_client.rows_to_return = [
+        ["TA-TKY-B-01", "rp_binance_a", "BINANCE", "BTC/USDT, ETH/USDT ,SOL/USDT"],
+    ]
+    rows = fetch_repeaters(_creds())
+    assert len(rows) == 1
+    r = rows[0]
+    # app_name lands in the fh_name slot; service_id is None for repeaters
+    assert r.service_id is None
+    assert r.fh_name == "rp_binance_a"
+    assert r.hostname == "TA-TKY-B-01"
+    assert r.exchange_name == "BINANCE"
+    assert r.symbols == ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+    assert r.source == "repeater"
+
+
+def test_repeaters_empty_instruments_yields_empty_symbols(
+    patched_client: type[_FakeClient],
+) -> None:
+    patched_client.rows_to_return = [
+        ["h1", "rp_a", "BINANCE", ""],
+        ["h2", "rp_b", "BINANCE", None],
+    ]
+    rows = fetch_repeaters(_creds())
+    assert rows[0].symbols == ()
+    assert rows[1].symbols == ()
+    assert rows[0].source == "repeater"
+
+
+def test_repeaters_db_errors_wrapped(
+    patched_client: type[_FakeClient],
+) -> None:
+    patched_client.raise_on_query = RuntimeError("connection refused")
+    with pytest.raises(DBError, match="failed to query repeater_feeds"):
+        fetch_repeaters(_creds())

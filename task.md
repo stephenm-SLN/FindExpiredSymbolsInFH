@@ -2,6 +2,39 @@
 
 Tick items as they complete. New tasks may be appended as the project progresses.
 
+## Open items — quick index
+
+All still-open work, grouped by area. Details (and their siblings, done and open) live in the phases below.
+
+### Symbol translation / venue coverage
+- [ ] Verify `DYDXV4 → dydx` is the correct ccxt id (Phase 7b — ccxt 4.5.60 ships only one `dydx`, presumed V4)
+- [ ] Decide policy for ccxt-unsupported venues (accept `ERROR` rows or introduce a sentinel `UNSUPPORTED` status): `DRIFT`, `DRIFTDM`, `ENCLAVEDM`, `SOVERTEX`, `INJECTIVE`, `BLUEFIN`, `BLUEFINPRO`, `IDEXDM`, `AVAVERTEX`, `BERAVERTEX`, `MNTVERTEX`, `VERTEX`, `KALSHI`, `HUNDREDX`, `PYTH`, `PYTHPRO`, `BINANCEALPHA` (Phase 7b)
+- [ ] Identify FH `ARCUS`, `M2`, `THLRIP`, `THLBMX` — no ccxt id known, no custom-venue endpoint identified (Phases 7b, 7d)
+- [ ] Resume `POLYMARKETINT`: needs the FH-side abbreviation → real slug/condition-id mapping table AND a decision on the downstream endpoint to validate against (`gamma-api.polymarket.com` vs `api.prod.polymarketexchange.com`). Until then, its rows stay `ERROR` (Phase 7d)
+- [ ] Verify assumptions with real FH samples for `WHITEBITDM` / `CRYPTOCOMDM` / `KRAKENDM` linear translators; the 14 `KRAKENDM` inverse markets are also unresolved without FH-side disambiguation (Phase 7f)
+- [ ] Verify HL family (`HLXYZ`, `HLCASH`, `HLKM`, `HLFLX`) — mapped to `hyperliquid` but FH symbol format for each variant unverified; recommend `--exchange-name HLXYZ -v --show-listed` etc. (Phase 7b)
+
+### End-to-end / handover
+- [ ] Manually verify the `.vscode/launch.json` "TA-TKY-A-41" config breaks on breakpoints (Phase 5 — requires user)
+- [ ] Live-run verification checklist items 1–9 in Phase 6 (tests + real deploy cover most of this already; formal tick still open)
+- [ ] Final pass for type hints + docstrings on the new package (Phase 7)
+
+### Packaging & deploy
+- [ ] Publish wheel to the Nexus PyPI mirror so `pip install find-expired-symbols` works without a git remote (Phase 8, deferred)
+- [ ] CI job to build + publish the wheel on tag (Phase 8, deferred)
+- [ ] Ship a systemd `.service` + `.timer` example (Phase 8, deferred — user schedules externally)
+- [ ] Automate the "bootstrap `/opt/pyhost` + install `/opt/find-expired-symbols` + set permissions" pass into a helper script or Ansible role (Phase 8b)
+
+### Nice-to-have follow-ups (Phase 9)
+- [ ] Persistent on-disk cache of `load_markets()` keyed by exchange + day
+- [ ] ANSI colour in text output when stdout is a TTY
+- [ ] Pre-commit hook that blocks commits containing the literal DB password
+- [ ] `mysql_select_query.py`: context-manager pattern + connect/read timeouts
+- [ ] Schema-drift guard at startup (`DESCRIBE crypto_db.fh_config`)
+- [ ] CI workflow that runs `pytest`, `mypy`, `ruff`
+
+---
+
 ## Phase 0 — Planning & sign-off
 
 - [x] Read `CLAUDE.md`, existing helpers, and `.DBCreds.yaml`
@@ -23,11 +56,12 @@ Tick items as they complete. New tasks may be appended as the project progresses
 ## Phase 1 — Repo hygiene (do FIRST, before any new code)
 
 - [x] Add `.DBCreds.*`, `__pycache__/`, `*.pyc`, `.pytest_cache/` to `.gitignore`
-- [x] Verify ignore rules by inspection (workspace is not a git repo yet, so `git check-ignore` is N/A; rules confirmed by reading `.gitignore` — `.DBCreds.*` matches the yaml file, `exchange_mapping.yaml` matches no rule)
+- [x] Extend `.gitignore` for dev/packaging noise: `.mypy_cache/`, `.ruff_cache/`, `build/`, `dist/`, `*.egg-info/` (added alongside the Phase-8 packaging work)
+- [x] Verify ignore rules by inspection (rules confirmed by reading `.gitignore` — `.DBCreds.*` matches the yaml file, `fh_symbol_check/data/exchange_mapping.yaml` matches no rule and is tracked)
 - [x] Add `python=>=3.10,<3.14`, `pymysql`, `pyyaml` to `[dependencies]` and `ccxt` to `[pypi-dependencies]` (conda-forge has no current `ccxt`); lock with `pixi install`
 - [x] Add `pytest`, `mypy`, `ruff` to `[feature.dev.dependencies]` and create `dev` environment
 - [x] Smoke test: `pixi run --environment dev python -c "import pymysql, ccxt, yaml"` → OK (python 3.13.14, pymysql 2.2.8, ccxt 4.5.60, yaml 6.0.3)
-- [ ] (Follow-up) `git init` so `.gitignore` actively protects creds before any commit
+- [x] `git init` so `.gitignore` actively protects creds before any commit
 
 ## Phase 2 — Helper refactors (Q7 approved — diffs reviewed first)
 
@@ -157,6 +191,60 @@ Tick items as they complete. New tasks may be appended as the project progresses
 - [x] README: Example 14 added with stdout / FH-form / ccxt-form / combinations, plus CLI reference row + updated "at least one of" line
 - [x] Gates clean: ruff, mypy, 153 pytest
 
+### Phase 7h.1 — extend `--symbol` to accept one-or-more values (OR semantics)
+
+- [x] Argparse: switched `--symbol` to `nargs="+"` with `metavar="SYMBOL"` so `--help` renders `--symbol SYMBOL [SYMBOL ...]`. Argparse rejects `--symbol` with no values (nargs='+' contract). Space-separated invocation:
+  ```
+  pixi run python find_expired_symbols.py --symbol IP/USDT-PERP BTC/USDT-PERP ETH/USDT-PERP
+  ```
+- [x] `args.symbol` is now `list[str] | None` (was `str | None`). All existing bool-truthiness checks (`if args.symbol:`, `bool(args.symbol)`) continue to work.
+- [x] `filter_by_symbol(tasks, errors, symbols: Iterable[str])`: match logic is `original_symbol in wanted or ccxt_symbol in wanted` where `wanted = set(symbols)`. **OR semantics** — a row is kept if any of the provided values matches on either side. Duplicate values in the input are deduplicated by the set (no double-counting). Empty iterable filters everything out.
+- [x] `_describe_filters` renamed `symbol → symbols`; renders `symbols=['IP/USDT-PERP', 'BTC/USDT-PERP']` in the filter-summary INFO line.
+- [x] Test coverage: existing 8 `filter_by_symbol` tests migrated to the list form; **4 new tests** added — multi-value OR semantics, mixed FH-form/ccxt-form in one call, duplicate deduplication, empty-iterable behaviour.
+- [x] `tests/test_cli.py`: refreshed to expect `args.symbol == ["IP/USDT-PERP"]` (list of one) instead of the bare string; added tests for multiple space-separated values, greedy-stop at the next flag, and rejection of `--symbol` with no values.
+- [x] Docs sync: README Example 14, CLI reference, `design.md` (§3.6 signature + arrow-diagram box + CLI §3.8), `implementation.md` (CLI shape + `filter_by_symbol` signature + verification steps), `requirements.md` (inputs, functional requirements, success criteria).
+- [x] Gates clean: ruff, mypy, **165 pytest** (was 158; +7 new).
+
+## Phase 7i — OKEX fix (mixed spot + linear + inverse under one exchange_name)
+
+- [x] Diagnosed: `OKEX → okx` was in `exchange_mapping.yaml` but had **no translator registered**. FH stores OKEX symbols in three shapes under a single `exchange_name`: spot `<BASE>/<QUOTE>` (no suffix), linear perps `<BASE>/USDT-PERP`, and inverse perps `<BASE>/USD-PERP`. Perps went to ccxt as-is (`ETH/USDT-PERP`, `BTC/USD-PERP`) → not valid market keys → every perp row was `DELISTED`. User reported: `ETH/USDT-PERP` and `BTC/USD-PERP` falsely `DELISTED`.
+- [x] Live probe of `ccxt.okx().load_markets()`: 411 linear USDT-margined perps (`<BASE>/USDT:USDT`) + 15 inverse USD-margined perps (`<BASE>/USD:<BASE>`). Same mixed shape as BYBITDM/BITGETDM.
+- [x] Registered `OKEX: _translate_perp_by_quote` (existing primitive — no new code needed). Spot symbols (no `-PERP` suffix) fall through untouched and match ccxt-okx spot keys directly, so the single translator covers all three shapes.
+- [x] Verified live: `ETH/USDT-PERP → ETH/USDT:USDT` (present + active), `BTC/USD-PERP → BTC/USD:BTC` (present + active).
+- [x] Extended `_translate_perp_by_quote` docstring to note the spot-passthrough behaviour makes it viable for venues that mix spot + perps under one `exchange_name`.
+- [x] 1 new dispatch test (`test_translate_dispatches_for_okex`) covering both perp flavours and spot passthrough; added `OKEX` to the `expected_by_quote` set in the registry-contents assertion.
+- [x] README "How symbol translation works" — added `OKEX` to the by-quote list and called out the shared spot+perp `exchange_name` pattern.
+- [x] Gates clean: ruff, mypy, **166 pytest** (was 165; +1 new).
+
+## Phase 7j — Repeater support (`crypto_db.repeater_feeds`)
+
+- [x] User request: run the same delisted-symbol checks against the repeater layer using `SELECT hostname, app_name, exchange_name, instruments FROM crypto_db.repeater_feeds`.
+- [x] Locked design decisions with the user before touching code:
+  - `instruments` is a comma-separated CSV in the same shape as `fh_config.cover_names` — reuse the parser.
+  - `repeater_feeds.exchange_name` uses the same value set as `fh_config.exchange_name` — reuse `exchange_mapping.yaml` and the same translators.
+  - CLI shape: scan both by default; add `--source {fh, rp, both}` narrowing flag (default `both`).
+  - Row identity: reuse the existing `fh_name` slot for the repeater `app_name`; add a `source` field to disambiguate — no rename churn.
+  - Text detail: two labelled sections, `--- Feed handlers ---` then `--- Repeaters ---`.
+  - `--exchange-grouping`: single unified table with an added `source` column (so `(exchange, source)` is the group key).
+- [x] `models.py`: added `SourceKind = Literal["fh","repeater"]`. All three producer dataclasses (`FeedHandlerRow`, `ResolvedTask`, `SymbolResult`) now carry `source: SourceKind = "fh"` and `service_id: int | None = None`. Kwargs-only constructions everywhere → no breaking positional changes.
+- [x] `db.py`: added `fetch_repeaters(creds, hostname_pattern=None, *, exchange_name=None)` alongside `fetch_feed_handlers`. Both share `_compose_sql` (same LIKE / UPPER filter contract) and `_run_query` (same DBError wrapping, message scopes the failing table). Repeater rows land in the same `FeedHandlerRow` type — `app_name` in the `fh_name` slot, `service_id=None`, `source="repeater"`.
+- [x] `validator.py`: `build_tasks` propagates `row.source` verbatim to `ResolvedTask` and to the unknown-exchange ERROR rows. `_classify_one_exchange`, `_classify_custom_venue`, and `_error_result` propagate `t.source` into `SymbolResult`. Fully source-agnostic — the ccxt / custom-venue dispatch is untouched.
+- [x] `reporter.py`:
+  - Added `summary_by_repeater(results)` (source="repeater" only); `summary_by_fh` now filters to source="fh". Shared factoring via `_summary_by_producer`.
+  - `summary_by_exchange` group key = `(exchange_name, source)`; `ExchangeSummary` gained a `source` field.
+  - Text: two labelled detail sections (`--- Feed handlers ---` / `--- Repeaters ---`, elided when empty). Two summary tables — `Summary by feed handler` (header `fh_name`) and `Summary by repeater` (header `app_name`), also elided when empty (single-source runs render exactly one). Under `--exchange-grouping` a single unified table with an added `source` column; TOTAL row leaves the source cell blank.
+  - CSV: `source` added as the first column of `_CSV_FIELDS`. JSON: `source` + nullable `service_id` flow through via `asdict`.
+  - `keep_fhs_with_errors` identity = `(source, hostname, fh_name, exchange_name)` so a repeater ERROR doesn't drag in a same-named FH.
+- [x] `cli.py`: added `--source {fh, rp, both}` (default `both`). `main()` now calls `fetch_feed_handlers` and/or `fetch_repeaters` per the flag, with per-table DBError messages and per-table "no rows matched" WARNINGs. Both row lists are concatenated before `build_tasks`. Log lines that talked about "feed handlers" were widened to "producers" where the source is ambiguous (`--errors-only`, `--symbol 0-occurrences`).
+- [x] Tests: 20 new (186 total, was 166).
+  - `test_db.py` — `fetch_repeaters` SQL statement, bound filters, `instruments` CSV parsing, source stamp, empty-instruments behaviour, DBError scoping.
+  - `test_validator.py` — repeater-row build_tasks propagation, unknown-exchange ERROR propagation, classify_symbols end-to-end source propagation via mocked `load_exchange_markets_safe` / `classify`.
+  - `test_reporter.py` — `summary_by_fh` / `summary_by_repeater` source filtering, `summary_by_exchange` (exchange, source) group key, two-labelled-detail-sections split with strict ordering, two-summary-tables with correct `fh_name` / `app_name` headers, single-source runs render only one table, `--exchange-grouping` has a `source` column with both fh and repeater rows for the same exchange, `keep_fhs_with_errors` disambiguation.
+  - `test_cli.py` — `--source` accepts `fh`/`rp`/`both`, defaults to `both`, rejects unknown, composes with `--all` + `--symbol`.
+  - Existing tests: 3 pre-existing repaired (CSV header + `ExchangeSummary` constructor + `--exchange-grouping` TOTAL row cells).
+- [x] Gates clean: ruff, mypy, **186 pytest** (was 166; +20 new).
+- [x] Docs sync: `requirements.md`, `design.md`, `implementation.md`, `README.md`, `task.md`.
+
 ## Phase 7g — `--exchange-grouping` summary
 
 - [x] New CLI flag `--exchange-grouping` (text-only): replaces the per-FH summary table with a per-exchange one
@@ -253,6 +341,28 @@ Deferred (documented, out of scope for v1):
 - [ ] Publish wheel to the Nexus PyPI mirror (`https://nexus.selini.tech/repository/pypi-hosted/simple`) so `pip install find-expired-symbols` works without a git remote — user picked "cross that bridge later" for the update flow.
 - [ ] CI job to build + publish the wheel on tag.
 - [ ] Ship a systemd `.service` + `.timer` example — user is scheduling externally (Airflow/Jenkins/etc.), so this isn't in v1.
+
+## Phase 8b — Multi-user shared pixi deploy (Linux server)
+
+Real-world server deploy uncovered several host-Python and packaging
+gaps that the plain `python -m venv + pip install <wheel>` recipe
+couldn't handle. Reworked into a shared pixi-workspace model so one
+install serves both interactive users and the scheduler, and neither
+side depends on the system Python.
+
+- [x] `deploy/shared-workspace-pixi.toml` — template pixi manifest checked into the repo. Declares `python>=3.11,<3.14` + `cryptography = "*"` under `[dependencies]` (conda-forge), the local wheel under `[pypi-dependencies]`, and a `[tasks] find-expired-symbols` entry that prefills `--creds-file /opt/find-expired-symbols/.DBCreds.yaml`.
+- [x] Diagnosed and worked around the `cryptography` `manylinux_2_28` vs. conda-forge Python `manylinux_2_26` mismatch by pulling `cryptography` from conda-forge instead of PyPI; ccxt (transitively pulling `cryptography`) accepts the conda-forge build via pixi's conda↔pypi name mapping.
+- [x] Confirmed ccxt itself has no conda-forge build and must stay on PyPI (via the wheel's own metadata) — documented in-line in the template + troubleshooting cheatsheet.
+- [x] `deploy.md` — 11-part runbook: prerequisites → build wheel → ship → bootstrap Python via `/opt/pyhost` pixi env → shared install workspace at `/opt/find-expired-symbols/` → creds → permissions → optional `/usr/local/bin` wrapper → smoke test as a non-admin user → scheduler wiring (Airflow / Jenkins / cron + logrotate) → upgrading → uninstall/rollback → troubleshooting cheatsheet → directory map.
+- [x] Consolidated `.DBCreds.yaml` inside the install workspace (`/opt/find-expired-symbols/.DBCreds.yaml`) instead of `/etc/find-expired-symbols/` — matches the dev-repo convention (creds file next to `find_expired_symbols.py`), keeps the whole deploy under one tree, and simplifies uninstall to a single `rm -rf`.
+- [x] Documented the multi-user permissions model: install tree `755`/`644`, binaries in `.pixi/envs/default/bin/` restored to `755`, creds file locked to `640 root:$FES_GROUP` after the blanket chmod so it isn't world-readable.
+- [x] Scheduler contract locked: absolute-path invocation → `.pixi/envs/default/bin/find-expired-symbols`; exit codes `0/1/2/130` frozen by `tests/test_packaging.py::test_exit_codes_exported`.
+- [x] `README.md` — "Deploying on a Linux server" section rewritten to point at `deploy.md` for the runbook and show the pixi-based pattern inline.
+- [x] Live end-to-end deploy verified on the target host (build wheel on dev box → scp → `pixi install` on the server → `pixi run find-expired-symbols --help` → real DB smoke test).
+
+Deferred out of Phase 8b:
+
+- [ ] Provide a small helper script or Ansible role that reproduces the "bootstrap `/opt/pyhost` + install `/opt/find-expired-symbols` + set permissions" pass in one command; the manual runbook works and rerolling into automation isn't urgent.
 
 ## Phase 9 — Suggested follow-ups (not in this iteration)
 

@@ -156,6 +156,18 @@ def test_translate_dispatches_for_bitgetdm() -> None:
     assert translate("BITGETDM", "BTC/USD-PERP") == "BTC/USD:BTC"
 
 
+def test_translate_dispatches_for_okex() -> None:
+    """OKEX carries both spot AND perps under one FH exchange_name.
+    Spot symbols must pass through unchanged; perps split by quote."""
+    # Perps (both flavours live on ccxt-okx)
+    assert translate("OKEX", "ETH/USDT-PERP") == "ETH/USDT:USDT"  # linear
+    assert translate("OKEX", "BTC/USD-PERP") == "BTC/USD:BTC"     # inverse
+    assert translate("OKEX", "BTC/USDT-PERP") == "BTC/USDT:USDT"
+    # Spot passthrough
+    assert translate("OKEX", "BTC/USDT") == "BTC/USDT"
+    assert translate("OKEX", "ETH/USDT") == "ETH/USDT"
+
+
 def test_translate_is_case_insensitive_on_exchange_name() -> None:
     assert translate("woo", "BTC/USDT-PERP") == "BTC/USDT:USDT"
     assert translate("BinanceDMCoin", "BTC/USD-PERP") == "BTC/USD:BTC"
@@ -218,7 +230,7 @@ def test_registry_contains_expected_exchange_names() -> None:
     }
     expected_strip_quote = {"NADO"}
     expected_polymarketperps = {"POLYMARKETPERPS"}
-    expected_by_quote = {"BYBITDM", "BITGETDM"}
+    expected_by_quote = {"BYBITDM", "BITGETDM", "OKEX"}
     for name in expected_linear:
         assert TRANSLATORS[name] is _translate_perp_suffix, name
     for name in expected_inverse:

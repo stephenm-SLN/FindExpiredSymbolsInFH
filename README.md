@@ -1,19 +1,27 @@
 # FindExpiredSymbolsInFH
 
-For each symbol configured in the Feed Handler database (`crypto_db.fh_config`),
-ask the corresponding exchange (via [`ccxt`](https://github.com/ccxt/ccxt))
-whether the symbol is still listed and active. Symbols that the exchange has
-delisted or marked inactive show up in the report so they can be removed from
-the FH configuration.
+For each symbol configured by any producer in the Feed Handler database — the
+feed handlers themselves (`crypto_db.fh_config`) and the repeaters
+(`crypto_db.repeater_feeds`) — ask the corresponding exchange (via
+[`ccxt`](https://github.com/ccxt/ccxt)) whether the symbol is still listed
+and active. Symbols that the exchange has delisted or marked inactive show
+up in the report so they can be removed from the producer configuration.
 
 Filters let you target:
 
-- a single FH host (`--hostname`)
-- every FH for a given exchange (`--exchange-name`)
+- a single producer host (`--hostname`)
+- every producer for a given exchange (`--exchange-name`)
 - both at once
-- everything in `fh_config` (`--all`)
+- everything in the selected producer tables (`--all`)
+- one or more exact symbols anywhere across the fleet (`--symbol`)
 
-Output is text (with a per-feed-handler summary table), JSON, or CSV.
+By default the tool scans **both** producer tables (feed handlers and
+repeaters). Use `--source {fh, rp, both}` to narrow the scan.
+
+Output is text (with per-source summary tables — one for feed handlers, one
+for repeaters — or a single per-`(exchange, source)` table under
+`--exchange-grouping`), JSON, or CSV. JSON/CSV rows carry a `source` field
+so downstream consumers can split feed-handler and repeater rows.
 
 ---
 
@@ -150,12 +158,19 @@ WOODEX: woofipro
 The entry point is `find_expired_symbols.py`. All examples below use
 `pixi run python` so they pick up the project environment.
 
-You must supply **at least one** of `--hostname`, `--exchange-name`, or
-`--all`. `--all` is mutually exclusive with the other two.
+You must supply **at least one** of `--hostname`, `--exchange-name`,
+`--symbol`, or `--all`. `--all` is mutually exclusive with `--hostname` /
+`--exchange-name`. All filters compose across whichever producer tables
+`--source` selects.
+
+By default `--source both` — every filter runs against both `fh_config`
+and `repeater_feeds`. Pass `--source fh` (feed handlers only) or
+`--source rp` (repeaters only) to narrow the scan.
 
 ### Example 1 — single host
 
-Report every FH symbol on `TA-TKY-A-41` (substring match against `hostname`):
+Report every producer symbol on `TA-TKY-A-41` (substring match against
+`hostname`). Scans both feed handlers and repeaters by default:
 
 ```bash
 pixi run python find_expired_symbols.py --hostname TA-TKY-A-41
@@ -204,12 +219,28 @@ pixi run python find_expired_symbols.py \
 
 ### Example 6 — everything, everywhere
 
-Scan every row in `fh_config`. Useful for a full-fleet audit; expect more
-exchange API calls and a longer runtime.
+Scan every row in both `fh_config` and `repeater_feeds`. Useful for a
+full-fleet audit; expect more exchange API calls and a longer runtime.
 
 ```bash
 pixi run python find_expired_symbols.py --all
 ```
+
+To limit the scan to one producer table, pass `--source`:
+
+```bash
+pixi run python find_expired_symbols.py --all --source fh   # feed handlers only
+pixi run python find_expired_symbols.py --all --source rp   # repeaters only
+pixi run python find_expired_symbols.py --all --source both # explicit default
+```
+
+When both tables are scanned, the text report emits **two summary tables** —
+`Summary by feed handler` (column header `fh_name`) and `Summary by
+repeater` (column header `app_name`) — and the detail block is split into
+`--- Feed handlers ---` and `--- Repeaters ---` sections. Empty sections
+and empty tables are elided, so a single-source run renders exactly one.
+JSON / CSV rows carry a `source` field (`"fh"` or `"repeater"`), and
+`service_id` is `null` / empty for repeater rows.
 
 ### Example 7 — JSON output to a file
 
@@ -289,24 +320,33 @@ pixi run python find_expired_symbols.py \
     --exchange-map ./mapping-overrides.yaml
 ```
 
-### Example 14 — find every occurrence of a specific symbol
+### Example 14 — find every occurrence of one or more specific symbols
 
-Locate one symbol across the entire fleet (handy when you suspect a single
-ticker is misbehaving or you want to know which FHs subscribe to it):
+Locate one or more symbols across the entire fleet (handy when you suspect
+a single ticker is misbehaving or you want to know which FHs subscribe to
+it). `--symbol` takes one or more space-separated values:
 
 ```bash
+# One symbol
 pixi run python find_expired_symbols.py --symbol IP/USDT-PERP
+
+# Multiple symbols in one run (OR semantics \u2014 keeps rows matching any)
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP BTC/USDT-PERP ETH/USDT-PERP
 ```
 
-When used alone, `--symbol` implies `--all`, so the scan covers every FH.
-The match is **case-sensitive and exact** (full-string equality), checked
-against both the FH-side value (the `cover_names` entry, e.g.
-`IP/USDT-PERP`) and the translated venue-side value (e.g. `IP/USDT:USDT`).
-This means you can pass either form and the lookup just works:
+When used alone, `--symbol` implies `--all`, so the scan covers every
+producer row selected by `--source` (both feed handlers and repeaters
+by default). Matching is **case-sensitive and exact** (full-string
+equality). Each value is checked against both the producer-side symbol
+(the `cover_names` entry for feed handlers, the `instruments` entry for
+repeaters \u2014 e.g. `IP/USDT-PERP`) and the translated venue-side symbol
+(e.g. `IP/USDT:USDT`), so you can pass either form \u2014 or a mix of both \u2014
+and the lookup just works:
 
 ```bash
 pixi run python find_expired_symbols.py --symbol "IP/USDT:USDT"   # ccxt form
 pixi run python find_expired_symbols.py --symbol "IP/USDT-PERP"   # FH form
+pixi run python find_expired_symbols.py --symbol "IP/USDT-PERP" "BTC/USDT:USDT"  # mixed
 ```
 
 When `--symbol` is set, LISTED rows are auto-included in the text report
@@ -320,17 +360,17 @@ Combines naturally with the existing filter flags:
 pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --hostname TA-TKY-A-41
 
 # Narrow to a single exchange
-pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --exchange-name BINANCE
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP BTC/USDT-PERP --exchange-name BINANCE
 
-# Per-exchange roll-up of where the symbol lives
-pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --exchange-grouping
+# Per-exchange roll-up of where the symbols live
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP BTC/USDT-PERP --exchange-grouping
 
-# Only surface FHs where the symbol is broken
-pixi run python find_expired_symbols.py --symbol IP/USDT-PERP --errors-only
+# Only surface FHs where any of the symbols are broken
+pixi run python find_expired_symbols.py --symbol IP/USDT-PERP BTC/USDT-PERP --errors-only
 ```
 
-If no FH carries the symbol, you get a single WARNING line and an empty
-report rather than an error.
+If no FH carries any of the given symbols, you get a single WARNING line
+and an empty report rather than an error.
 
 ### Example 15 — per-exchange roll-up across the fleet
 
@@ -342,11 +382,14 @@ pixi run python find_expired_symbols.py --all --exchange-grouping
 ```
 
 The per-symbol detail block is suppressed on stdout (you're looking at
-fleet stats, not individual rows), and the summary table changes from
-`fh_name | hostname | exchange_name | …` to `exchange_name |
+fleet stats, not individual rows), and the per-source summary tables
+(`Summary by feed handler`, `Summary by repeater`) are replaced by a
+single per-`(exchange, source)` table: `exchange_name | source |
 feed_handlers | active | inactive | delisted | error | total dead |
-total`. The `feed_handlers` column counts distinct `(hostname, fh_name)`
-pairs reporting under each exchange.
+total`. The `source` column is `fh` or `repeater`; the `feed_handlers`
+column counts distinct `(hostname, name)` pairs reporting under each
+`(exchange, source)` bucket. If both a feed handler and a repeater report
+against the same exchange you'll see two rows for that exchange.
 
 To keep the per-symbol detail for triage, also pass `--output-file`:
 
@@ -356,8 +399,9 @@ pixi run python find_expired_symbols.py \
 ```
 
 The on-screen summary table is unchanged, but the written file also
-contains every `INACTIVE` / `DELISTED` / `ERROR` row grouped by feed
-handler so you can drill in.
+contains every `INACTIVE` / `DELISTED` / `ERROR` row grouped by producer
+(split into `--- Feed handlers ---` / `--- Repeaters ---` sections) so
+you can drill in.
 
 `--exchange-grouping` is a **text-only** flag — JSON and CSV output are
 unaffected and continue to emit one row per symbol.
@@ -411,31 +455,36 @@ The invariant `active + inactive + delisted + error == total` always holds.
 
 ### JSON
 
-`--output json` emits one object per checked symbol:
+`--output json` emits one object per checked symbol. `source` is `"fh"`
+for rows sourced from `crypto_db.fh_config` and `"repeater"` for rows
+sourced from `crypto_db.repeater_feeds`; `service_id` is `null` for
+repeater rows (the DB table has no such column).
 
 ```json
 [
   {
-    "service_id": 4007,
     "fh_name": "fh_binancedm_4007",
     "hostname": "TA-TKY-A-41_LOCAL",
     "exchange_name": "BINANCEDM",
     "ccxt_id": "binanceusdm",
-    "internal_symbol": "BTC/USDT-PERP",
+    "original_symbol": "BTC/USDT-PERP",
     "ccxt_symbol": "BTC/USDT:USDT",
     "status": "LISTED",
-    "detail": ""
+    "detail": "",
+    "source": "fh",
+    "service_id": 4007
   },
   {
-    "service_id": 4007,
-    "fh_name": "fh_binancedm_4007",
-    "hostname": "TA-TKY-A-41_LOCAL",
+    "fh_name": "rp_binancedm_a",
+    "hostname": "TA-TKY-B-01",
     "exchange_name": "BINANCEDM",
     "ccxt_id": "binanceusdm",
-    "internal_symbol": "SOMEOLD/USDT-PERP",
+    "original_symbol": "SOMEOLD/USDT-PERP",
     "ccxt_symbol": "SOMEOLD/USDT:USDT",
     "status": "DELISTED",
-    "detail": "not found in binanceusdm markets"
+    "detail": "not found in binanceusdm markets",
+    "source": "repeater",
+    "service_id": null
   }
 ]
 ```
@@ -443,13 +492,16 @@ The invariant `active + inactive + delisted + error == total` always holds.
 ### CSV
 
 `--output csv` writes the same fields as a header row plus one row per
-symbol, suitable for a spreadsheet or `xsv` / `pandas`:
+symbol, suitable for a spreadsheet or `xsv` / `pandas`. `source` is the
+first column so you can pivot / filter by producer type; `service_id` is
+empty for repeater rows:
 
 ```csv
-service_id,fh_name,hostname,exchange_name,ccxt_id,internal_symbol,ccxt_symbol,status,detail
-4006,fh_binance_4006,TA-TKY-A-41_LOCAL,BINANCE,binance,BTC/USDT,BTC/USDT,LISTED,
-4006,fh_binance_4006,TA-TKY-A-41_LOCAL,BINANCE,binance,OLDSPOT/USDT,OLDSPOT/USDT,INACTIVE,active=False
-4007,fh_binancedm_4007,TA-TKY-A-41_LOCAL,BINANCEDM,binanceusdm,BTC/USDT-PERP,BTC/USDT:USDT,LISTED,
+source,service_id,fh_name,hostname,exchange_name,ccxt_id,original_symbol,ccxt_symbol,status,detail
+fh,4006,fh_binance_4006,TA-TKY-A-41_LOCAL,BINANCE,binance,BTC/USDT,BTC/USDT,LISTED,
+fh,4006,fh_binance_4006,TA-TKY-A-41_LOCAL,BINANCE,binance,OLDSPOT/USDT,OLDSPOT/USDT,INACTIVE,active=False
+fh,4007,fh_binancedm_4007,TA-TKY-A-41_LOCAL,BINANCEDM,binanceusdm,BTC/USDT-PERP,BTC/USDT:USDT,LISTED,
+repeater,,rp_binancedm_a,TA-TKY-B-01,BINANCEDM,binanceusdm,SOMEOLD/USDT-PERP,SOMEOLD/USDT:USDT,DELISTED,not found in binanceusdm markets
 ```
 
 ---
@@ -458,15 +510,16 @@ service_id,fh_name,hostname,exchange_name,ccxt_id,internal_symbol,ccxt_symbol,st
 
 | Flag                                  | Default                  | Description                                                                              |
 | ------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------- |
-| `--hostname <STR>`                    | —                        | Substring matched via `hostname LIKE %<STR>%`                                            |
-| `--exchange-name <STR>`               | —                        | Case-insensitive exact match against `fh_config.exchange_name`                           |
+| `--hostname <STR>`                    | —                        | Substring matched via `hostname LIKE %<STR>%` (applied to whichever tables `--source` selects) |
+| `--exchange-name <STR>`               | —                        | Case-insensitive exact match against `exchange_name` (applied to whichever tables `--source` selects) |
 | `--all`                               | off                      | Scan every row; mutually exclusive with `--hostname` / `--exchange-name`                 |
-| `--symbol <STR>`                      | —                        | Find every occurrence of this exact symbol (case-sensitive, matched against both FH and venue forms). Used alone implies `--all`; combines with the other filters. Auto-enables `--show-listed` in text output |
+| `--source {fh,rp,both}`               | `both`                   | Which producer tables to query. `fh` = `crypto_db.fh_config` only; `rp` = `crypto_db.repeater_feeds` only; `both` = concatenate rows from both |
+| `--symbol <STR> [<STR> ...]`          | —                        | Find every occurrence of one or more exact symbols (space-separated; OR semantics; case-sensitive, matched against both producer and venue forms). Used alone implies `--all`; combines with the other filters. Auto-enables `--show-listed` in text output |
 | `--output {text,json,csv}`            | `text`                   | Report format                                                                            |
 | `--output-file <PATH>`                | stdout                   | Write report here instead of stdout                                                      |
 | `--show-listed`                       | off                      | Include `LISTED` rows in the text report                                                 |
-| `--errors-only`                       | off                      | Filter report to feed handlers with at least one `ERROR` row (log + exit code unchanged) |
-| `--exchange-grouping`                 | off                      | Text only: replace the per-FH summary table with a per-exchange one; suppresses the per-symbol detail block on stdout unless `--output-file` is also set |
+| `--errors-only`                       | off                      | Filter report to producers with at least one `ERROR` row (producer identity is `(source, hostname, name, exchange_name)` so an FH and a repeater with the same name are not conflated). Log + exit code unchanged |
+| `--exchange-grouping`                 | off                      | Text only: replace the per-source summary tables with a single per-`(exchange, source)` one (adds a `source` column); suppresses the per-symbol detail block on stdout unless `--output-file` is also set |
 | `--concurrency <N>`                   | `4`                      | Max parallel ccxt exchanges (one `load_markets` per exchange, shared across its symbols) |
 | `--fail-on-invalid` / `--no-fail-on-invalid` | `--fail-on-invalid` | Exit 1 when any `DELISTED` / `INACTIVE` row is present                                   |
 | `--creds-file <PATH>`                 | `./.DBCreds.yaml`        | Credentials YAML                                                                         |
@@ -572,9 +625,12 @@ feed handlers:
   `BINANCEDMCOIN`, `HUOBICOINSWAP`, `PHEMEXDMCOIN`
 - **By-quote** — picks linear or inverse based on the quote currency
   (`USD` → inverse, anything else → linear):
-  `BITGETDM`, `BYBITDM`. Bybit and Bitget each host both linear
+  `BITGETDM`, `BYBITDM`, `OKEX`. These venues host both linear
   (`BTC/USDT-PERP`) and inverse (`BTC/USD-PERP`) perps under a single FH
-  `exchange_name`.
+  `exchange_name`. `OKEX` additionally carries **spot** symbols under the
+  same `exchange_name` — those have no `-PERP` suffix, so the translator
+  passes them through unchanged (`BTC/USDT` → `BTC/USDT`) and they match
+  ccxt-okx's spot markets directly.
 
 Two of the linear-translator venues use `USD` as both quote and settlement
 (`BTC/USD:USD` rather than `BTC/USDT:USDT`):
@@ -608,8 +664,10 @@ when they differ, so it is obvious what was actually checked.
    NEWEX: ccxtid
    ```
 
-   The key must match `fh_config.exchange_name` exactly (uppercase by
-   convention). The value must be a valid `ccxt` exchange id; verify with
+   The key must match the `exchange_name` value stored in the producer
+   tables (`fh_config` and/or `repeater_feeds` — both share the same
+   value set) exactly, uppercase by convention. The value must be a
+   valid `ccxt` exchange id; verify with
    `pixi run python -c "import ccxt; print('ccxtid' in ccxt.exchanges)"`.
 
 2. If the FH stores symbols in a non-ccxt format, register a translator in
@@ -644,8 +702,10 @@ directly. The framework lives in `fh_symbol_check/custom_venues/`:
    CUSTOM_VENUES["NEWVENUE"] = newvenue.fetch_symbols
    ```
 
-   The key must match `fh_config.exchange_name` (uppercase). Custom-venue
-   routing happens **before** the `exchange_mapping.yaml` lookup, so you do
+   The key must match the `exchange_name` value stored in the producer
+   tables (`fh_config` and/or `repeater_feeds` — both share the same
+   value set), uppercase. Custom-venue routing happens **before** the
+   `exchange_mapping.yaml` lookup, so you do
    **not** need a YAML entry for these.
 
 3. Tests should exercise the parser against fixture JSON (no network); see
@@ -699,10 +759,10 @@ The only file the operator still has to provide is the DB credential
 file:
 
 ```bash
-# Secret \u2014 keep it outside the repo and chmod 600
-sudo install -d -m 700 /etc/find-expired-symbols
-sudo cp .DBCreds.yaml   /etc/find-expired-symbols/DBCreds.yaml
-sudo chmod 600           /etc/find-expired-symbols/DBCreds.yaml
+# Secret \u2014 lives inside the install workspace, same convention as
+# .DBCreds.yaml next to find_expired_symbols.py in the dev repo
+sudo cp .DBCreds.yaml /opt/find-expired-symbols/.DBCreds.yaml
+sudo chmod 600         /opt/find-expired-symbols/.DBCreds.yaml
 ```
 
 Then any scheduler (Airflow, Jenkins, cron, systemd timers, …) can
@@ -710,7 +770,7 @@ invoke it like a normal shell command:
 
 ```bash
 /opt/find-expired-symbols/venv/bin/find-expired-symbols \
-    --creds-file /etc/find-expired-symbols/DBCreds.yaml \
+    --creds-file /opt/find-expired-symbols/.DBCreds.yaml \
     --all \
     --output json \
     --output-file /var/log/find-expired-symbols/$(date +%F).json
@@ -789,4 +849,4 @@ common filter modes.
 | Many `ERROR` rows for a single exchange                              | Either the `exchange_name` is missing from `exchange_mapping.yaml`, or the exchange's REST API is rate-limiting / unreachable.  |
 | Symbols you expect to be valid show as `DELISTED`                    | Almost always a symbol-translation mismatch — re-run with `-v` and compare `internal_symbol` vs `ccxt_symbol` in the report.    |
 | `creds error: section 'crypto_db' not found`                         | Wrong `--creds-section` or your YAML is missing that section.                                                                   |
-| Exit code 2 with `specify --hostname, --exchange-name, or --all`     | You ran the tool with no filter. Pick one; `--all` is the explicit "scan everything" option.                                    |
+| Exit code 2 with `specify --hostname, --exchange-name, --symbol, or --all` | You ran the tool with no filter. Pick one; `--all` is the explicit "scan everything" option.                              |

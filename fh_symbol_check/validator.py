@@ -57,6 +57,7 @@ def build_tasks(
                         ccxt_id=custom_id,
                         original_symbol=sym,
                         ccxt_symbol=translate(row.exchange_name, sym),
+                        source=row.source,
                     )
                 )
             continue
@@ -76,6 +77,7 @@ def build_tasks(
                         ccxt_symbol="",
                         status="ERROR",
                         detail=detail,
+                        source=row.source,
                     )
                 )
             continue
@@ -90,6 +92,7 @@ def build_tasks(
                     ccxt_id=ccxt_id,
                     original_symbol=sym,
                     ccxt_symbol=translate(row.exchange_name, sym),
+                    source=row.source,
                 )
             )
 
@@ -99,25 +102,28 @@ def build_tasks(
 def filter_by_symbol(
     tasks: list[ResolvedTask],
     errors: list[SymbolResult],
-    symbol: str,
+    symbols: Iterable[str],
 ) -> tuple[list[ResolvedTask], list[SymbolResult]]:
     """Keep only tasks/errors whose ``original_symbol`` OR ``ccxt_symbol``
-    equals ``symbol``.
+    equals **any** value in ``symbols``.
 
     Match is **case-sensitive** and exact (full string equality). Both sides
     are checked so the caller can pass either the FH-internal form
     (``IP/USDT-PERP``) or the translated venue form (``IP/USDT:USDT``) and
-    get the same row back.
+    get the same row back. Multiple symbols use OR semantics — a row is
+    kept if it matches any of the provided values.
 
-    Returns a new (tasks, errors) pair; the inputs are not mutated.
+    Returns a new (tasks, errors) pair; the inputs are not mutated. An
+    empty ``symbols`` iterable filters everything out.
     """
+    wanted = set(symbols)
     matched_tasks = [
         t for t in tasks
-        if t.original_symbol == symbol or t.ccxt_symbol == symbol
+        if t.original_symbol in wanted or t.ccxt_symbol in wanted
     ]
     matched_errors = [
         e for e in errors
-        if e.original_symbol == symbol or e.ccxt_symbol == symbol
+        if e.original_symbol in wanted or e.ccxt_symbol in wanted
     ]
     return matched_tasks, matched_errors
 
@@ -190,6 +196,7 @@ def _classify_one_exchange(
                 ccxt_symbol=t.ccxt_symbol,
                 status=status,  # type: ignore[arg-type]
                 detail=detail,
+                source=t.source,
             )
         )
     return out
@@ -247,6 +254,7 @@ def _classify_custom_venue(
                 ccxt_symbol=t.ccxt_symbol,
                 status=status,  # type: ignore[arg-type]
                 detail=detail,
+                source=t.source,
             )
         )
     return out
@@ -263,4 +271,5 @@ def _error_result(t: ResolvedTask, detail: str) -> SymbolResult:
         ccxt_symbol=t.ccxt_symbol,
         status="ERROR",
         detail=detail,
+        source=t.source,
     )

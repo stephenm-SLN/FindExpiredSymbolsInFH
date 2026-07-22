@@ -24,26 +24,57 @@ def test_symbol_arg_parses_and_defaults_to_none() -> None:
     assert args.symbol is None
 
 
-def test_symbol_arg_with_value() -> None:
+def test_symbol_arg_single_value_becomes_one_element_list() -> None:
     args = _build_parser().parse_args(["--symbol", "IP/USDT-PERP"])
-    assert args.symbol == "IP/USDT-PERP"
+    assert args.symbol == ["IP/USDT-PERP"]
+
+
+def test_symbol_arg_accepts_multiple_space_separated_values() -> None:
+    args = _build_parser().parse_args(
+        ["--symbol", "IP/USDT-PERP", "BTC/USDT-PERP", "ETH/USDT-PERP"]
+    )
+    assert args.symbol == ["IP/USDT-PERP", "BTC/USDT-PERP", "ETH/USDT-PERP"]
+
+
+def test_symbol_arg_stops_greedy_consumption_at_next_flag() -> None:
+    """argparse's nargs='+' must stop consuming when the next flag starts."""
+    args = _build_parser().parse_args(
+        ["--symbol", "IP/USDT-PERP", "BTC/USDT-PERP", "--hostname", "TA"]
+    )
+    assert args.symbol == ["IP/USDT-PERP", "BTC/USDT-PERP"]
+    assert args.hostname == "TA"
+
+
+def test_symbol_arg_with_no_values_is_rejected(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--symbol` on its own (no values) must be rejected by argparse."""
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["--symbol", "--all"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "expected at least one argument" in err or "--symbol" in err
 
 
 def test_symbol_combines_with_hostname() -> None:
-    args = _build_parser().parse_args(["--symbol", "IP/USDT-PERP", "--hostname", "TA-TKY"])
-    assert args.symbol == "IP/USDT-PERP"
+    args = _build_parser().parse_args(
+        ["--symbol", "IP/USDT-PERP", "--hostname", "TA-TKY"]
+    )
+    assert args.symbol == ["IP/USDT-PERP"]
     assert args.hostname == "TA-TKY"
 
 
 def test_symbol_combines_with_exchange_name() -> None:
-    args = _build_parser().parse_args(["--symbol", "IP/USDT-PERP", "--exchange-name", "BINANCE"])
-    assert args.symbol == "IP/USDT-PERP"
+    args = _build_parser().parse_args(
+        ["--symbol", "IP/USDT-PERP", "--exchange-name", "BINANCE"]
+    )
+    assert args.symbol == ["IP/USDT-PERP"]
     assert args.exchange_name == "BINANCE"
 
 
 def test_symbol_combines_with_all() -> None:
     args = _build_parser().parse_args(["--symbol", "IP/USDT-PERP", "--all"])
-    assert args.symbol == "IP/USDT-PERP"
+    assert args.symbol == ["IP/USDT-PERP"]
     assert args.all is True
 
 
@@ -103,3 +134,37 @@ def test_all_plus_exchange_name_still_rejected(capsys: pytest.CaptureFixture[str
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "--all cannot be combined with --hostname or --exchange-name" in err
+
+
+# ---------------------------------------------------------------------------
+# --source flag: producer-table selection
+# ---------------------------------------------------------------------------
+
+
+def test_source_defaults_to_both() -> None:
+    """Default: no --source flag \u2192 scan both fh_config and repeater_feeds."""
+    args = _build_parser().parse_args(["--all"])
+    assert args.source == "both"
+
+
+def test_source_accepts_fh_rp_both() -> None:
+    for value in ("fh", "rp", "both"):
+        args = _build_parser().parse_args(["--all", "--source", value])
+        assert args.source == value
+
+
+def test_source_rejects_unknown_choice(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["--all", "--source", "repeater"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--source" in err
+
+
+def test_source_combines_with_symbol_and_all() -> None:
+    args = _build_parser().parse_args(
+        ["--symbol", "IP/USDT-PERP", "--all", "--source", "rp"]
+    )
+    assert args.source == "rp"
+    assert args.all is True
+    assert args.symbol == ["IP/USDT-PERP"]

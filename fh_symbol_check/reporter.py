@@ -8,16 +8,20 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from typing import Literal, TextIO
 
-from .models import SymbolResult, SymbolStatus
+from .models import SourceKind, SymbolResult, SymbolStatus
 
 Format = Literal["text", "json", "csv"]
 
 
 @dataclass(frozen=True)
 class FeedHandlerSummary:
-    """Per-feed-handler aggregate counts for the summary table.
+    """Per-producer aggregate counts for the summary table.
 
-    Buckets are mutually exclusive: active + inactive + delisted + error == total.
+    Used for BOTH feed handlers (``source="fh"``) and repeaters
+    (``source="repeater"``). ``fh_name`` stores whichever identifier the
+    source uses — the DB ``fh_name`` for FHs, the DB ``app_name`` for
+    repeaters. Buckets are mutually exclusive:
+    ``active + inactive + delisted + error == total``.
     """
 
     fh_name: str
@@ -33,15 +37,18 @@ class FeedHandlerSummary:
 
 @dataclass(frozen=True)
 class ExchangeSummary:
-    """Per-exchange aggregate counts for the --exchange-grouping summary table.
+    """Per-(exchange, source) aggregate counts for the ``--exchange-grouping``
+    summary table.
 
-    Each row collapses every FH targeting the same ``exchange_name`` into one
-    line. ``feed_handlers`` is the count of distinct (hostname, fh_name) pairs
-    contributing to this exchange. Buckets are mutually exclusive:
-    active + inactive + delisted + error == total.
+    Each row collapses every producer targeting the same
+    (``exchange_name``, ``source``) pair into one line. ``feed_handlers`` is
+    the count of distinct (hostname, fh_name) pairs contributing to this
+    exchange/source. Buckets are mutually exclusive:
+    ``active + inactive + delisted + error == total``.
     """
 
     exchange_name: str
+    source: SourceKind  # "fh" or "repeater"
     feed_handlers: int
     active: int  # LISTED
     inactive: int
@@ -51,6 +58,7 @@ class ExchangeSummary:
     total: int
 
 _CSV_FIELDS = [
+    "source",
     "service_id",
     "fh_name",
     "hostname",
@@ -64,12 +72,15 @@ _CSV_FIELDS = [
 
 
 def keep_fhs_with_errors(results: list[SymbolResult]) -> list[SymbolResult]:
-    """Return the subset of ``results`` belonging to feed handlers that have at
-    least one ``ERROR`` row. All rows of an offending FH are retained (not just
-    its ERROR rows) so the surviving FH summaries remain complete.
+    """Return the subset of ``results`` belonging to producers that have at
+    least one ``ERROR`` row. All rows of an offending producer are retained
+    (not just its ERROR rows) so the surviving summaries remain complete.
+
+    Producer identity is ``(source, hostname, fh_name, exchange_name)`` so
+    a repeater and a feed handler with the same name aren't confused.
     """
-    offending: set[tuple[str, str, str]] = {
-        (r.hostname, r.fh_name, r.exchange_name)
+    offending: set[tuple[SourceKind, str, str, str]] = {
+        (r.source, r.hostname, r.fh_name, r.exchange_name)
         for r in results
         if r.status == "ERROR"
     }
@@ -78,7 +89,7 @@ def keep_fhs_with_errors(results: list[SymbolResult]) -> list[SymbolResult]:
     return [
         r
         for r in results
-        if (r.hostname, r.fh_name, r.exchange_name) in offending
+        if (r.source, r.hostname, r.fh_name, r.exchange_name) in offending
     ]
 
 
@@ -94,12 +105,30 @@ def summary(results: list[SymbolResult]) -> dict[SymbolStatus, int]:
 
 
 def summary_by_fh(results: list[SymbolResult]) -> list[FeedHandlerSummary]:
-    """Aggregate results into one row per feed handler.
+    """Aggregate feed-handler results into one row per producer.
 
-    Sorted by (hostname, fh_name, exchange_name) for stable output.
+    Only rows with ``source="fh"`` contribute. Sorted by (hostname, fh_name,
+    exchange_name) for stable output.
     """
+    return _summary_by_producer(results, source="fh")
+
+
+def summary_by_repeater(results: list[SymbolResult]) -> list[FeedHandlerSummary]:
+    """Aggregate repeater results into one row per producer.
+
+    Only rows with ``source="repeater"`` contribute. Same shape as
+    :func:`summary_by_fh` — ``fh_name`` slot holds the repeater ``app_name``.
+    """
+    return _summary_by_producer(results, source="repeater")
+
+
+def _summary_by_producer(
+    results: list[SymbolResult], *, source: SourceKind
+) -> list[FeedHandlerSummary]:
     grouped: dict[tuple[str, str, str], Counter[str]] = defaultdict(Counter)
     for r in results:
+        if r.source != source:
+            continue
         key = (r.hostname, r.fh_name, r.exchange_name)
         grouped[key][r.status] += 1
 
@@ -126,20 +155,22 @@ def summary_by_fh(results: list[SymbolResult]) -> list[FeedHandlerSummary]:
 
 
 def summary_by_exchange(results: list[SymbolResult]) -> list[ExchangeSummary]:
-    """Aggregate results into one row per ``exchange_name``.
+    """Aggregate results into one row per (``exchange_name``, ``source``).
 
-    Sorted alphabetically by exchange_name for stable output. ``feed_handlers``
-    counts distinct ``(hostname, fh_name)`` pairs contributing to each exchange.
+    Sorted by (exchange_name, source) for stable output. ``feed_handlers``
+    counts distinct ``(hostname, fh_name)`` pairs contributing to each
+    (exchange, source) bucket.
     """
-    counts: dict[str, Counter[str]] = defaultdict(Counter)
-    fh_keys: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    counts: dict[tuple[str, SourceKind], Counter[str]] = defaultdict(Counter)
+    fh_keys: dict[tuple[str, SourceKind], set[tuple[str, str]]] = defaultdict(set)
     for r in results:
-        counts[r.exchange_name][r.status] += 1
-        fh_keys[r.exchange_name].add((r.hostname, r.fh_name))
+        key = (r.exchange_name, r.source)
+        counts[key][r.status] += 1
+        fh_keys[key].add((r.hostname, r.fh_name))
 
     rows: list[ExchangeSummary] = []
-    for exchange_name in sorted(counts):
-        c = counts[exchange_name]
+    for (exchange_name, source) in sorted(counts):
+        c = counts[(exchange_name, source)]
         listed = c["LISTED"]
         inactive = c["INACTIVE"]
         delisted = c["DELISTED"]
@@ -147,7 +178,8 @@ def summary_by_exchange(results: list[SymbolResult]) -> list[ExchangeSummary]:
         rows.append(
             ExchangeSummary(
                 exchange_name=exchange_name,
-                feed_handlers=len(fh_keys[exchange_name]),
+                source=source,
+                feed_handlers=len(fh_keys[(exchange_name, source)]),
                 active=listed,
                 inactive=inactive,
                 delisted=delisted,
@@ -196,6 +228,22 @@ def _render_csv(results: list[SymbolResult], stream: TextIO) -> None:
         writer.writerow(asdict(r))
 
 
+_SOURCE_TITLES: dict[SourceKind, str] = {
+    "fh": "Feed handlers",
+    "repeater": "Repeaters",
+}
+
+_SOURCE_NAME_HEADER: dict[SourceKind, str] = {
+    "fh": "fh_name",
+    "repeater": "app_name",
+}
+
+_SOURCE_SUMMARY_TITLE: dict[SourceKind, str] = {
+    "fh": "Summary by feed handler",
+    "repeater": "Summary by repeater",
+}
+
+
 def _render_text(
     results: list[SymbolResult],
     stream: TextIO,
@@ -205,37 +253,20 @@ def _render_text(
     suppress_details: bool,
 ) -> None:
     if not suppress_details:
-        grouped: dict[tuple[str, str, str], list[SymbolResult]] = defaultdict(list)
-        for r in results:
-            grouped[(r.hostname, r.fh_name, r.exchange_name)].append(r)
-
-        printable_statuses = {"INACTIVE", "DELISTED", "ERROR"}
-        if show_listed:
-            printable_statuses.add("LISTED")
-
-        any_printed = False
-        for key in sorted(grouped):
-            hostname, fh_name, exchange_name = key
-            rows = [r for r in grouped[key] if r.status in printable_statuses]
-            if not rows:
-                continue
-            any_printed = True
-            stream.write(f"\n[{hostname}] {fh_name} ({exchange_name})\n")
-            for r in rows:
-                line = f"  {r.status:<9} {r.original_symbol}"
-                if r.ccxt_symbol and r.ccxt_symbol != r.original_symbol:
-                    line += f"  (ccxt={r.ccxt_symbol})"
-                if r.detail:
-                    line += f"  -- {r.detail}"
-                stream.write(line + "\n")
-
-        if not any_printed:
-            stream.write("\nNo invalid symbols found.\n")
+        _render_detail_sections(results, stream, show_listed=show_listed)
 
     if exchange_grouping:
         _render_exchange_summary_table(summary_by_exchange(results), stream)
     else:
-        _render_fh_summary_table(summary_by_fh(results), stream)
+        # Two separate summary tables — one per source. Empty tables are elided
+        # by _render_producer_summary_table so single-source runs render exactly
+        # one table.
+        _render_producer_summary_table(
+            summary_by_fh(results), stream, source="fh"
+        )
+        _render_producer_summary_table(
+            summary_by_repeater(results), stream, source="repeater"
+        )
 
     counts = summary(results)
     stream.write(
@@ -245,6 +276,57 @@ def _render_text(
         f"DELISTED={counts['DELISTED']} "
         f"ERROR={counts['ERROR']}\n"
     )
+
+
+def _render_detail_sections(
+    results: list[SymbolResult],
+    stream: TextIO,
+    *,
+    show_listed: bool,
+) -> None:
+    """Emit per-producer detail rows, split into labelled sections per source.
+
+    Sections are only emitted when they contain at least one printable row
+    (INACTIVE/DELISTED/ERROR, plus LISTED when ``show_listed`` is set).
+    """
+    printable_statuses = {"INACTIVE", "DELISTED", "ERROR"}
+    if show_listed:
+        printable_statuses.add("LISTED")
+
+    any_printed = False
+    for source in ("fh", "repeater"):
+        source_results = [r for r in results if r.source == source]
+        if not source_results:
+            continue
+
+        grouped: dict[tuple[str, str, str], list[SymbolResult]] = defaultdict(list)
+        for r in source_results:
+            grouped[(r.hostname, r.fh_name, r.exchange_name)].append(r)
+
+        printable_groups: list[
+            tuple[tuple[str, str, str], list[SymbolResult]]
+        ] = []
+        for key in sorted(grouped):
+            rows = [r for r in grouped[key] if r.status in printable_statuses]
+            if rows:
+                printable_groups.append((key, rows))
+        if not printable_groups:
+            continue
+
+        stream.write(f"\n--- {_SOURCE_TITLES[source]} ---\n")  # type: ignore[index]
+        for (hostname, producer_name, exchange_name), rows in printable_groups:
+            stream.write(f"\n[{hostname}] {producer_name} ({exchange_name})\n")
+            for r in rows:
+                line = f"  {r.status:<9} {r.original_symbol}"
+                if r.ccxt_symbol and r.ccxt_symbol != r.original_symbol:
+                    line += f"  (ccxt={r.ccxt_symbol})"
+                if r.detail:
+                    line += f"  -- {r.detail}"
+                stream.write(line + "\n")
+        any_printed = True
+
+    if not any_printed:
+        stream.write("\nNo invalid symbols found.\n")
 
 
 def _render_psql_table(
@@ -294,14 +376,25 @@ def _render_psql_table(
     stream.write(hline() + "\n")
 
 
-def _render_fh_summary_table(
-    summaries: list[FeedHandlerSummary], stream: TextIO
+def _render_producer_summary_table(
+    summaries: list[FeedHandlerSummary],
+    stream: TextIO,
+    *,
+    source: SourceKind,
 ) -> None:
+    """Render one per-producer summary table, labelled per source.
+
+    Empty ``summaries`` -> nothing rendered (handled inside ``_render_psql_table``
+    but short-circuited here to skip the totals-row construction too).
+    """
     if not summaries:
         return
 
+    name_header = _SOURCE_NAME_HEADER[source]
+    title = _SOURCE_SUMMARY_TITLE[source]
+
     headers = (
-        "fh_name",
+        name_header,
         "hostname",
         "exchange_name",
         "active",
@@ -337,7 +430,7 @@ def _render_fh_summary_table(
         str(sum(s.total for s in summaries)),
     )
     _render_psql_table(
-        title="Summary by feed handler",
+        title=title,
         headers=headers,
         rows=rows,
         totals_row=totals_row,
@@ -354,6 +447,7 @@ def _render_exchange_summary_table(
 
     headers = (
         "exchange_name",
+        "source",
         "feed_handlers",
         "active",
         "inactive",
@@ -365,6 +459,7 @@ def _render_exchange_summary_table(
     rows: list[tuple[str, ...]] = [
         (
             s.exchange_name,
+            s.source,
             str(s.feed_handlers),
             str(s.active),
             str(s.inactive),
@@ -377,6 +472,7 @@ def _render_exchange_summary_table(
     ]
     totals_row: tuple[str, ...] = (
         "TOTAL",
+        "",
         str(sum(s.feed_handlers for s in summaries)),
         str(sum(s.active for s in summaries)),
         str(sum(s.inactive for s in summaries)),
@@ -390,6 +486,6 @@ def _render_exchange_summary_table(
         headers=headers,
         rows=rows,
         totals_row=totals_row,
-        text_col_idx=(0,),
+        text_col_idx=(0, 1),
         stream=stream,
     )

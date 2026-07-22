@@ -13,6 +13,7 @@ from fh_symbol_check.reporter import (
     summary,
     summary_by_exchange,
     summary_by_fh,
+    summary_by_repeater,
 )
 
 
@@ -26,7 +27,8 @@ def _r(
     ccxt_id: str = "htx",
     fh_name: str = "fh_huobi_4002",
     hostname: str = "TA-TKY-A-41_LOCAL",
-    service_id: int = 4002,
+    service_id: int | None = 4002,
+    source: str = "fh",
 ) -> SymbolResult:
     return SymbolResult(
         service_id=service_id,
@@ -38,6 +40,7 @@ def _r(
         ccxt_symbol=ccxt_symbol if ccxt_symbol is not None else symbol,
         status=status,  # type: ignore[arg-type]
         detail=detail,
+        source=source,  # type: ignore[arg-type]
     )
 
 
@@ -67,6 +70,7 @@ def test_render_csv_has_expected_header() -> None:
     reader = csv.DictReader(io.StringIO(out.getvalue()))
     header = reader.fieldnames
     assert header == [
+        "source",
         "service_id",
         "fh_name",
         "hostname",
@@ -80,6 +84,7 @@ def test_render_csv_has_expected_header() -> None:
     row = next(reader)
     assert row["original_symbol"] == "DEAD/USDT"
     assert row["status"] == "DELISTED"
+    assert row["source"] == "fh"
 
 
 def test_render_text_omits_listed_by_default_and_includes_invalid() -> None:
@@ -454,11 +459,12 @@ def test_render_text_exchange_grouping_total_row_sums_correctly() -> None:
     total_lines = [line for line in text.splitlines() if line.startswith("| TOTAL")]
     assert len(total_lines) == 1
     cells = [c.strip() for c in total_lines[0].strip("|").split("|")]
-    # exchange_name, feed_handlers, active, inactive, delisted, error, total_dead, total
-    # HUOBI: fh=2 act=3 in=1 del=1 err=1 dead=2 tot=6
-    # WOODEX: fh=1 act=1 in=0 del=0 err=0 dead=0 tot=1
+    # exchange_name, source, feed_handlers, active, inactive, delisted, error, total_dead, total
+    # The TOTAL row leaves `source` empty (only aggregates the numeric columns).
+    # HUOBI/fh: fh=2 act=3 in=1 del=1 err=1 dead=2 tot=6
+    # WOODEX/fh: fh=1 act=1 in=0 del=0 err=0 dead=0 tot=1
     # TOTAL: fh=3 act=4 in=1 del=1 err=1 dead=2 tot=7
-    assert cells == ["TOTAL", "3", "4", "1", "1", "1", "2", "7"]
+    assert cells == ["TOTAL", "", "3", "4", "1", "1", "1", "2", "7"]
 
 
 def test_render_text_suppress_details_skips_per_symbol_rows() -> None:
@@ -523,6 +529,7 @@ def test_exchange_summary_dataclass_basic() -> None:
     """Just making sure the dataclass is importable and constructible."""
     s = ExchangeSummary(
         exchange_name="HUOBI",
+        source="fh",
         feed_handlers=2,
         active=3,
         inactive=1,
@@ -532,4 +539,162 @@ def test_exchange_summary_dataclass_basic() -> None:
         total=6,
     )
     assert s.exchange_name == "HUOBI"
+    assert s.source == "fh"
     assert s.feed_handlers == 2
+
+
+# ---------------------------------------------------------------------------
+# Source-split summaries (fh vs repeater)
+# ---------------------------------------------------------------------------
+
+
+def _mixed_source_dataset() -> list[SymbolResult]:
+    """Small dataset covering both sources on the same exchange."""
+    return [
+        # FH rows on HUOBI
+        _r("LISTED", exchange_name="HUOBI", ccxt_id="htx",
+           fh_name="fh_huobi", source="fh"),
+        _r("DELISTED", symbol="DEAD/USDT", exchange_name="HUOBI", ccxt_id="htx",
+           fh_name="fh_huobi", source="fh"),
+        # Repeater rows on HUOBI
+        _r("LISTED", exchange_name="HUOBI", ccxt_id="htx",
+           fh_name="rp_huobi", service_id=None, source="repeater"),
+        _r("INACTIVE", symbol="OLD/USDT", exchange_name="HUOBI", ccxt_id="htx",
+           fh_name="rp_huobi", service_id=None, source="repeater"),
+        # Repeater rows on BINANCE
+        _r("LISTED", exchange_name="BINANCE", ccxt_id="binance",
+           fh_name="rp_binance", service_id=None, source="repeater"),
+    ]
+
+
+def test_summary_by_fh_filters_to_fh_source_only() -> None:
+    results = _mixed_source_dataset()
+    fh_summaries = summary_by_fh(results)
+    assert [s.fh_name for s in fh_summaries] == ["fh_huobi"]
+    assert fh_summaries[0].active == 1
+    assert fh_summaries[0].delisted == 1
+
+
+def test_summary_by_repeater_filters_to_repeater_source_only() -> None:
+    results = _mixed_source_dataset()
+    rp_summaries = summary_by_repeater(results)
+    names = sorted(s.fh_name for s in rp_summaries)
+    assert names == ["rp_binance", "rp_huobi"]
+    huobi = next(s for s in rp_summaries if s.fh_name == "rp_huobi")
+    assert huobi.active == 1
+    assert huobi.inactive == 1
+
+
+def test_summary_by_exchange_groups_by_exchange_and_source() -> None:
+    """The exchange summary must split (exchange, source) so a repeater and an
+    FH on the same exchange become two rows."""
+    results = _mixed_source_dataset()
+    rows = summary_by_exchange(results)
+    keys = [(r.exchange_name, r.source) for r in rows]
+    assert keys == [
+        ("BINANCE", "repeater"),
+        ("HUOBI", "fh"),
+        ("HUOBI", "repeater"),
+    ]
+    huobi_fh = next(r for r in rows if r.exchange_name == "HUOBI" and r.source == "fh")
+    huobi_rp = next(r for r in rows if r.exchange_name == "HUOBI" and r.source == "repeater")
+    assert huobi_fh.feed_handlers == 1 and huobi_fh.total == 2
+    assert huobi_rp.feed_handlers == 1 and huobi_rp.total == 2
+
+
+def test_render_text_emits_two_labelled_detail_sections() -> None:
+    """Detail blocks for fh vs repeater rows are separated by titled section
+    headers so the operator can tell them apart at a glance."""
+    results = _mixed_source_dataset()
+    out = io.StringIO()
+    render(results, "text", out)
+    text = out.getvalue()
+
+    fh_idx = text.find("--- Feed handlers ---")
+    rp_idx = text.find("--- Repeaters ---")
+    assert fh_idx >= 0, "expected the FH section header"
+    assert rp_idx >= 0, "expected the repeater section header"
+    assert fh_idx < rp_idx, "FH section must come before repeater section"
+
+    fh_section = text[fh_idx:rp_idx]
+    rp_section = text[rp_idx:]
+    # FH section shows the FH DELISTED row, not the repeater INACTIVE row.
+    assert "DELISTED  DEAD/USDT" in fh_section
+    assert "OLD/USDT" not in fh_section
+    # Repeater section shows the repeater INACTIVE row, not the FH DELISTED.
+    assert "INACTIVE  OLD/USDT" in rp_section
+    assert "DEAD/USDT" not in rp_section
+
+
+def test_render_text_emits_two_summary_tables_with_correct_headers() -> None:
+    results = _mixed_source_dataset()
+    out = io.StringIO()
+    render(results, "text", out)
+    text = out.getvalue()
+
+    fh_title_idx = text.find("Summary by feed handler:")
+    rp_title_idx = text.find("Summary by repeater:")
+    assert fh_title_idx >= 0
+    assert rp_title_idx >= 0
+    assert fh_title_idx < rp_title_idx
+
+    # The FH table uses `fh_name` as the first column; the repeater table uses `app_name`.
+    fh_block = text[fh_title_idx:rp_title_idx]
+    rp_block = text[rp_title_idx:]
+    assert "| fh_name" in fh_block
+    assert "| app_name" in rp_block
+
+
+def test_render_text_single_source_only_renders_one_summary_table() -> None:
+    """A pure-fh (or pure-repeater) run must not emit an empty second table."""
+    fh_only = [
+        _r("LISTED", exchange_name="HUOBI", source="fh"),
+        _r("DELISTED", symbol="DEAD/USDT", exchange_name="HUOBI", source="fh"),
+    ]
+    out = io.StringIO()
+    render(fh_only, "text", out)
+    text = out.getvalue()
+    assert "Summary by feed handler:" in text
+    assert "Summary by repeater:" not in text
+    assert "--- Repeaters ---" not in text
+
+
+def test_render_text_exchange_grouping_row_has_source_column() -> None:
+    """With --exchange-grouping, the per-exchange table gains a `source` column
+    so (exchange, source) is the group key."""
+    results = _mixed_source_dataset()
+    out = io.StringIO()
+    render(results, "text", out, exchange_grouping=True)
+    text = out.getvalue()
+
+    header_line = next(
+        line for line in text.splitlines() if line.strip().startswith("| exchange_name")
+    )
+    header_cells = [c.strip() for c in header_line.strip("|").split("|")]
+    assert header_cells[:2] == ["exchange_name", "source"]
+
+    # Two HUOBI rows (fh + repeater) and one BINANCE row (repeater).
+    huobi_lines = [
+        line for line in text.splitlines()
+        if line.startswith("| HUOBI")
+    ]
+    assert len(huobi_lines) == 2
+    assert any("| fh" in line for line in huobi_lines)
+    assert any("| repeater" in line for line in huobi_lines)
+
+
+def test_keep_fhs_with_errors_disambiguates_by_source() -> None:
+    """A feed handler and a repeater with the same fh_name / hostname / exchange
+    must not be conflated: an ERROR on one must not drag the other in."""
+    results = [
+        _r("LISTED", exchange_name="HUOBI", fh_name="dup", source="fh"),
+        _r("LISTED", exchange_name="HUOBI", fh_name="dup",
+           service_id=None, source="repeater"),
+        _r("ERROR", exchange_name="HUOBI", fh_name="dup",
+           service_id=None, source="repeater"),
+    ]
+    kept = keep_fhs_with_errors(results)
+    # Only the two repeater rows should survive (the fh_name=dup FH row must not
+    # be dragged in by the repeater's ERROR).
+    assert len(kept) == 2
+    assert all(r.source == "repeater" for r in kept)

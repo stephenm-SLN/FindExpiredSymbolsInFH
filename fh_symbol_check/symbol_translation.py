@@ -63,18 +63,20 @@ def _translate_perp_suffix_inverse(s: str) -> str:
 def _translate_perp_by_quote(s: str) -> str:
     """FH internal "<BASE>/<QUOTE>-PERP" -> linear OR inverse ccxt key based on quote.
 
-    Some venues (e.g. Bybit) host both linear and inverse perps under a single FH
-    exchange_name (BYBITDM). The convention used downstream:
+    Some venues (e.g. Bybit, Bitget, OKX) host both linear and inverse perps under
+    a single FH exchange_name (BYBITDM, BITGETDM, OKEX). The convention used downstream:
 
         quote == "USD"   -> inverse  "<BASE>/<QUOTE>:<BASE>"
         quote != "USD"   -> linear   "<BASE>/<QUOTE>:<QUOTE>"   (USDT, USDC, USDe, …)
 
     Examples:
-        "BTC/USDT-PERP" -> "BTC/USDT:USDT"   (Bybit linear)
+        "BTC/USDT-PERP" -> "BTC/USDT:USDT"   (Bybit / OKX linear)
         "BTC/USDC-PERP" -> "BTC/USDC:USDC"
-        "BTC/USD-PERP"  -> "BTC/USD:BTC"     (Bybit inverse)
+        "BTC/USD-PERP"  -> "BTC/USD:BTC"     (Bybit / OKX inverse)
 
-    Non-perp symbols (no -PERP suffix) are returned unchanged.
+    Non-perp symbols (no -PERP suffix) are returned unchanged, which lets FH venues
+    that carry both spot and perps under the same exchange_name (e.g. OKEX) share
+    this translator: "BTC/USDT" -> "BTC/USDT" (spot passthrough).
     """
     suffix = "-PERP"
     if not s.endswith(suffix):
@@ -167,6 +169,12 @@ TRANSLATORS: dict[str, Translator] = {
     "KRAKENDM": _translate_perp_suffix,
     "KUCOINDM": _translate_perp_suffix,
     "NADO": _translate_perp_strip_quote,
+    # OKEX carries BOTH spot and perps under one FH exchange_name. Spot symbols
+    # (no -PERP suffix) fall through _translate_perp_by_quote untouched and
+    # match ccxt-okx spot keys directly (BTC/USDT). Perps split by quote:
+    # linear <BASE>/USDT-PERP -> <BASE>/USDT:USDT (411 markets at check time),
+    # inverse <BASE>/USD-PERP -> <BASE>/USD:<BASE> (15 markets at check time).
+    "OKEX": _translate_perp_by_quote,
     "PHEMEXDMCOIN": _translate_perp_suffix_inverse,
     "PHEMEXDMT": _translate_perp_suffix,
     "POLYMARKETPERPS": _translate_polymarketperps,

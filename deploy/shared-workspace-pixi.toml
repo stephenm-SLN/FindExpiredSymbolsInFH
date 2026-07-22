@@ -12,23 +12,53 @@ version = "0.1.0"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 
+# cryptography is pulled in transitively by ccxt. Recent PyPI wheels of
+# cryptography require `manylinux_2_28` (glibc 2.28+), but the
+# conda-forge Python pixi installs advertises `manylinux_2_26` as its
+# top-supported tag — so pip/uv can't find a compatible wheel and
+# `pixi install` fails with:
+#
+#   Wheel: cryptography-<ver>-cp3xx-abi3-manylinux_2_28_x86_64.whl
+#   doesn't match this systems virtual capabilities for tags:
+#     cp3xx-cp3xx-manylinux_2_26_x86_64 ...
+#
+# Declaring cryptography here forces it to be resolved from conda-forge,
+# which builds against the same glibc as the conda-forge Python and
+# therefore has no wheel-tag mismatch. Pixi/uv's conda↔pypi name
+# mapping recognises this as satisfying ccxt's PyPI requirement, so
+# ccxt won't try to reinstall it from PyPI.
 [dependencies]
 python = ">=3.11,<3.14"
+cryptography = "*"
 
+# ccxt itself has no conda-forge build (there's no `conda-forge::ccxt`
+# package), so it stays on PyPI. It's pure Python — no manylinux
+# concerns of its own — and its transitive C-extension deps
+# (cryptography above; add more here if they emerge) come from
+# conda-forge via [dependencies].
+#
+# pymysql (pure Python) and pyyaml (manylinux2014 wheels, glibc 2.17+)
+# are declared by the find-expired-symbols wheel and don't have the
+# same wheel-tag issue as cryptography, so they're resolved via PyPI
+# through the wheel's own metadata.
 [pypi-dependencies]
-# Local wheel produced by `pixi run -e dev python -m build --wheel` on
-# the dev box and scp'd next to this pixi.toml.
 find-expired-symbols = { path = "./find_expired_symbols-0.1.0-py3-none-any.whl" }
 
-# Default `find-expired-symbols` task. Prefills the shared DB creds path
-# so end users only have to type filter/report flags. Anything they add
-# on the command line is appended by pixi:
+# Default `find-expired-symbols` task. Prefills the DB creds path so end
+# users only have to type filter/report flags. Anything they add on the
+# command line is appended by pixi:
 #
 #   pixi run find-expired-symbols --symbol TON/USDT-PERP
 #     ↓ pixi expands to:
-#   find-expired-symbols --creds-file /etc/find-expired-symbols/DBCreds.yaml --symbol TON/USDT-PERP
+#   find-expired-symbols --creds-file <workspace-dir>/.DBCreds.yaml --symbol TON/USDT-PERP
+#
+# ``$PIXI_PROJECT_ROOT`` is set by pixi at task run-time to the directory
+# containing this pixi.toml, so the task works whether the install lives
+# at /opt/find-expired-symbols/, /home/<user>/opt/find-expired-symbols/,
+# or anywhere else — no editing required after copying this template
+# into place.
 #
 # argparse takes the *last* value for duplicated flags, so users can
 # still override with their own `--creds-file /path/to/other.yaml`.
 [tasks]
-find-expired-symbols = "find-expired-symbols --creds-file /etc/find-expired-symbols/DBCreds.yaml"
+find-expired-symbols = "find-expired-symbols --creds-file $PIXI_PROJECT_ROOT/.DBCreds.yaml"

@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import TextIO
 
 from .creds import CredsError, load_creds
-from .db import DBError, fetch_feed_handlers
+from .db import DBError, fetch_feed_handlers, fetch_repeaters
 from .exchange_map import ExchangeMapError, load_exchange_map
 from .logging_config import setup_logging
+from .models import FeedHandlerRow
 from .reporter import keep_fhs_with_errors, render, summary
 from .validator import build_tasks, classify_symbols, filter_by_symbol
 
@@ -65,21 +66,39 @@ def _build_parser() -> argparse.ArgumentParser:
         "--all",
         action="store_true",
         help=(
-            "Scan every feed handler row in fh_config (no filters). "
-            "Mutually exclusive with --hostname/--exchange-name."
+            "Scan every producer row (no --hostname / --exchange-name "
+            "filters). Which producer tables are scanned is controlled by "
+            "--source. Mutually exclusive with --hostname / --exchange-name."
+        ),
+    )
+    p.add_argument(
+        "--source",
+        choices=("fh", "rp", "both"),
+        default="both",
+        help=(
+            "Which producer tables to query (default: both). "
+            "`fh` = crypto_db.fh_config only; "
+            "`rp` = crypto_db.repeater_feeds only; "
+            "`both` = concatenate results from both tables. "
+            "All other filters (--hostname / --exchange-name / --symbol) "
+            "apply to whichever tables are scanned."
         ),
     )
     p.add_argument(
         "--symbol",
+        nargs="+",
         default=None,
+        metavar="SYMBOL",
         help=(
-            "Find all occurrences of this exact symbol across the scanned "
-            "feed handlers. Case-sensitive; matched against both the FH "
-            "symbol (cover_names value) AND the translated venue symbol. "
-            "Used alone, implies --all. Combines with --hostname / "
-            "--exchange-name / --errors-only / --exchange-grouping. When "
-            "set, LISTED rows are auto-included in text output so every "
-            "occurrence is visible."
+            "Find all occurrences of one or more exact symbols across the "
+            "scanned feed handlers. Space-separated "
+            "(e.g. `--symbol IP/USDT-PERP BTC/USDT-PERP`). Case-sensitive; "
+            "each value is matched against both the FH symbol (cover_names "
+            "value) AND the translated venue symbol; a row is kept if it "
+            "matches any of the provided values (OR semantics). Used alone, "
+            "implies --all. Combines with --hostname / --exchange-name / "
+            "--errors-only / --exchange-grouping. When set, LISTED rows are "
+            "auto-included in text output so every occurrence is visible."
         ),
     )
     p.add_argument(
@@ -205,18 +224,39 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("exchange map error: %s", e)
         return EXIT_OPERATIONAL_FAILURE
 
-    try:
-        rows = fetch_feed_handlers(
-            creds,
-            hostname_pattern=args.hostname,
-            exchange_name=args.exchange_name,
-        )
-    except DBError as e:
-        logger.error("DB error: %s", e)
-        return EXIT_OPERATIONAL_FAILURE
+    rows: list[FeedHandlerRow] = []
+    scan_fh = args.source in ("fh", "both")
+    scan_rp = args.source in ("rp", "both")
 
-    if not rows:
-        logger.warning("no fh_config rows matched filters (%s)", filter_desc)
+    if scan_fh:
+        try:
+            fh_rows = fetch_feed_handlers(
+                creds,
+                hostname_pattern=args.hostname,
+                exchange_name=args.exchange_name,
+            )
+        except DBError as e:
+            logger.error("DB error (fh_config): %s", e)
+            return EXIT_OPERATIONAL_FAILURE
+        if not fh_rows:
+            logger.warning("no fh_config rows matched filters (%s)", filter_desc)
+        rows.extend(fh_rows)
+
+    if scan_rp:
+        try:
+            rp_rows = fetch_repeaters(
+                creds,
+                hostname_pattern=args.hostname,
+                exchange_name=args.exchange_name,
+            )
+        except DBError as e:
+            logger.error("DB error (repeater_feeds): %s", e)
+            return EXIT_OPERATIONAL_FAILURE
+        if not rp_rows:
+            logger.warning(
+                "no repeater_feeds rows matched filters (%s)", filter_desc
+            )
+        rows.extend(rp_rows)
 
     tasks, early_errors = build_tasks(rows, exchange_map)
 
@@ -225,14 +265,14 @@ def main(argv: list[str] | None = None) -> int:
         before_errors = len(early_errors)
         tasks, early_errors = filter_by_symbol(tasks, early_errors, args.symbol)
         logger.info(
-            "--symbol %r: matched %d/%d task(s) and %d/%d unmappable-exchange error(s)",
+            "--symbol %s: matched %d/%d task(s) and %d/%d unmappable-exchange error(s)",
             args.symbol,
             len(tasks), before_tasks,
             len(early_errors), before_errors,
         )
         if not tasks and not early_errors:
             logger.warning(
-                "--symbol %r: 0 occurrences found in the scanned FH set",
+                "--symbol %s: 0 occurrences found in the scanned producer set",
                 args.symbol,
             )
 
@@ -250,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     rendered = keep_fhs_with_errors(results) if args.errors_only else results
     if args.errors_only:
         logger.info(
-            "--errors-only: rendering %d row(s) from feed handlers with ERROR status",
+            "--errors-only: rendering %d row(s) from producers with ERROR status",
             len(rendered),
         )
 
@@ -282,15 +322,15 @@ def main(argv: list[str] | None = None) -> int:
 def _describe_filters(
     hostname: str | None,
     exchange_name: str | None,
-    symbol: str | None = None,
+    symbols: list[str] | None = None,
 ) -> str:
     parts: list[str] = []
     if hostname:
         parts.append(f"hostname LIKE %{hostname}%")
     if exchange_name:
         parts.append(f"exchange_name={exchange_name!r}")
-    if symbol:
-        parts.append(f"symbol={symbol!r}")
+    if symbols:
+        parts.append(f"symbols={symbols!r}")
     return ", ".join(parts) if parts else "ALL (no filters)"
 
 

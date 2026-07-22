@@ -233,7 +233,7 @@ def test_filter_by_symbol_matches_original_side() -> None:
         _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
         _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
     ]
-    matched_tasks, matched_errors = filter_by_symbol(tasks, [], "IP/USDT-PERP")
+    matched_tasks, matched_errors = filter_by_symbol(tasks, [], ["IP/USDT-PERP"])
     assert [t.original_symbol for t in matched_tasks] == ["IP/USDT-PERP"]
     assert matched_errors == []
 
@@ -244,14 +244,14 @@ def test_filter_by_symbol_matches_ccxt_side() -> None:
         _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
         _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
     ]
-    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT:USDT")
+    matched_tasks, _ = filter_by_symbol(tasks, [], ["IP/USDT:USDT"])
     assert [t.original_symbol for t in matched_tasks] == ["IP/USDT-PERP"]
 
 
 def test_filter_by_symbol_is_case_sensitive() -> None:
     """We promised case-sensitive exact matching; `IP/USDT-Perp` must NOT match `IP/USDT-PERP`."""
     tasks = [_task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT")]
-    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT-Perp")
+    matched_tasks, _ = filter_by_symbol(tasks, [], ["IP/USDT-Perp"])
     assert matched_tasks == []
 
 
@@ -261,7 +261,7 @@ def test_filter_by_symbol_exact_only_not_substring() -> None:
         _task("1000IP/USDT-PERP", ccxt_symbol="1000IP/USDT:USDT"),
         _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
     ]
-    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT")
+    matched_tasks, _ = filter_by_symbol(tasks, [], ["IP/USDT"])
     assert matched_tasks == []
 
 
@@ -272,14 +272,14 @@ def test_filter_by_symbol_filters_unmappable_errors_too() -> None:
         _err("IP/USDT-PERP"),
         _err("BTC/USDT-PERP"),
     ]
-    _, matched_errors = filter_by_symbol([], errors, "IP/USDT-PERP")
+    _, matched_errors = filter_by_symbol([], errors, ["IP/USDT-PERP"])
     assert [e.original_symbol for e in matched_errors] == ["IP/USDT-PERP"]
 
 
 def test_filter_by_symbol_no_match_returns_empty() -> None:
     tasks = [_task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT")]
     errors = [_err("ETH/USDT-PERP")]
-    matched_tasks, matched_errors = filter_by_symbol(tasks, errors, "DOGE/USDT-PERP")
+    matched_tasks, matched_errors = filter_by_symbol(tasks, errors, ["DOGE/USDT-PERP"])
     assert matched_tasks == [] and matched_errors == []
 
 
@@ -288,7 +288,7 @@ def test_filter_by_symbol_does_not_mutate_inputs() -> None:
     errors = [_err("IP/USDT-PERP")]
     tasks_before = list(tasks)
     errors_before = list(errors)
-    _ = filter_by_symbol(tasks, errors, "IP/USDT-PERP")
+    _ = filter_by_symbol(tasks, errors, ["IP/USDT-PERP"])
     assert tasks == tasks_before
     assert errors == errors_before
 
@@ -312,5 +312,142 @@ def test_filter_by_symbol_keeps_all_fhs_for_that_symbol() -> None:
             original_symbol="OTHER/USDT", ccxt_symbol="OTHER/USDT",
         ),
     ]
-    matched_tasks, _ = filter_by_symbol(tasks, [], "IP/USDT-PERP")
+    matched_tasks, _ = filter_by_symbol(tasks, [], ["IP/USDT-PERP"])
     assert {t.fh_name for t in matched_tasks} == {"fh_a", "fh_b"}
+
+
+# ---------------------------------------------------------------------------
+# --symbol filter (filter_by_symbol) — multi-value / OR semantics
+# ---------------------------------------------------------------------------
+
+
+def test_filter_by_symbol_multi_value_or_semantics() -> None:
+    """`--symbol A B` keeps rows matching A OR B (union), not the intersection."""
+    tasks = [
+        _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
+        _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
+        _task("ETH/USDT-PERP", ccxt_symbol="ETH/USDT:USDT"),
+    ]
+    matched_tasks, _ = filter_by_symbol(
+        tasks, [], ["IP/USDT-PERP", "BTC/USDT-PERP"]
+    )
+    assert [t.original_symbol for t in matched_tasks] == [
+        "IP/USDT-PERP",
+        "BTC/USDT-PERP",
+    ]
+
+
+def test_filter_by_symbol_multi_value_mixes_sides() -> None:
+    """A caller can mix FH-form and ccxt-form entries in the same call."""
+    tasks = [
+        _task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT"),
+        _task("BTC/USDT-PERP", ccxt_symbol="BTC/USDT:USDT"),
+        _task("ETH/USDT-PERP", ccxt_symbol="ETH/USDT:USDT"),
+    ]
+    matched_tasks, _ = filter_by_symbol(
+        tasks, [], ["IP/USDT-PERP", "BTC/USDT:USDT"]  # FH form + ccxt form
+    )
+    assert [t.original_symbol for t in matched_tasks] == [
+        "IP/USDT-PERP",
+        "BTC/USDT-PERP",
+    ]
+
+
+def test_filter_by_symbol_multi_value_deduplicates() -> None:
+    """Duplicate symbols in the list must not duplicate matched rows."""
+    tasks = [_task("IP/USDT-PERP", ccxt_symbol="IP/USDT:USDT")]
+    matched_tasks, _ = filter_by_symbol(
+        tasks, [], ["IP/USDT-PERP", "IP/USDT-PERP", "IP/USDT:USDT"]
+    )
+    assert len(matched_tasks) == 1
+
+
+def test_filter_by_symbol_empty_iterable_filters_everything_out() -> None:
+    """Empty ``symbols`` matches nothing (the CLI prevents this path via
+    argparse ``nargs='+'``, but the pure function must still be well-defined)."""
+    tasks = [_task("IP/USDT-PERP"), _task("BTC/USDT-PERP")]
+    errors = [_err("IP/USDT-PERP")]
+    matched_tasks, matched_errors = filter_by_symbol(tasks, errors, [])
+    assert matched_tasks == [] and matched_errors == []
+
+
+# ---------------------------------------------------------------------------
+# source propagation (fh vs repeater)
+# ---------------------------------------------------------------------------
+
+
+def _repeater_row(
+    exchange_name: str, symbols: tuple[str, ...], app_name: str = "rp_binance_a"
+) -> FeedHandlerRow:
+    return FeedHandlerRow(
+        service_id=None,
+        fh_name=app_name,
+        hostname="TA-TKY-B-01",
+        exchange_name=exchange_name,
+        symbols=symbols,
+        source="repeater",
+    )
+
+
+def test_build_tasks_propagates_source_from_repeater_row() -> None:
+    rows = [
+        _row("HUOBI", ("BTC/USDT",)),  # default source="fh"
+        _repeater_row("BINANCE", ("BTC/USDT",)),
+    ]
+    tasks, errors = build_tasks(rows, {"HUOBI": "htx", "BINANCE": "binance"})
+
+    assert errors == []
+    assert len(tasks) == 2
+    by_ccxt = {t.ccxt_id: t for t in tasks}
+    assert by_ccxt["htx"].source == "fh"
+    assert by_ccxt["htx"].service_id == 4002
+    assert by_ccxt["binance"].source == "repeater"
+    assert by_ccxt["binance"].service_id is None
+    assert by_ccxt["binance"].fh_name == "rp_binance_a"
+
+
+def test_build_tasks_propagates_source_on_unknown_exchange_error() -> None:
+    """Unmappable rows become ERROR SymbolResults; the source must be preserved
+    so the reporter can render them in the correct section."""
+    rows = [_repeater_row("MYSTERY", ("BTC/USDT",))]
+    tasks, errors = build_tasks(rows, {"HUOBI": "htx"})
+
+    assert tasks == []
+    assert len(errors) == 1
+    assert errors[0].status == "ERROR"
+    assert errors[0].source == "repeater"
+    assert errors[0].service_id is None
+
+
+def test_classify_symbols_propagates_source_from_task_to_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeater-sourced ResolvedTask must yield a repeater-sourced SymbolResult
+    after ccxt classification."""
+
+    def fake_load(_ccxt_id):
+        return None, {"BTC/USDT": {"active": True}}
+
+    def fake_classify(_markets, _sym):
+        return "LISTED", ""
+
+    monkeypatch.setattr(validator_module, "load_exchange_markets_safe", fake_load)
+    monkeypatch.setattr(validator_module, "classify", fake_classify)
+
+    tasks = [
+        ResolvedTask(
+            service_id=None,
+            fh_name="rp_binance_a",
+            hostname="TA-TKY-B-01",
+            exchange_name="BINANCE",
+            ccxt_id="binance",
+            original_symbol="BTC/USDT",
+            ccxt_symbol="BTC/USDT",
+            source="repeater",
+        ),
+    ]
+    [result] = classify_symbols(tasks, concurrency=1)
+    assert result.status == "LISTED"
+    assert result.source == "repeater"
+    assert result.service_id is None
+    assert result.fh_name == "rp_binance_a"
