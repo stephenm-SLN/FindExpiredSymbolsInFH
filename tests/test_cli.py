@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from fh_symbol_check.cli import EXIT_OPERATIONAL_FAILURE, _build_parser, main
+import fh_symbol_check.cli as cli_module
+from fh_symbol_check.cli import EXIT_OPERATIONAL_FAILURE, _build_parser, main, run
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +169,67 @@ def test_source_combines_with_symbol_and_all() -> None:
     assert args.source == "rp"
     assert args.all is True
     assert args.symbol == ["IP/USDT-PERP"]
+
+
+# ---------------------------------------------------------------------------
+# `run()` installs the OS-native trust store before dispatching to main()
+# ---------------------------------------------------------------------------
+
+
+def test_run_calls_truststore_inject_into_ssl_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `run()` invocation must inject truststore before doing anything
+    that could hit HTTPS — otherwise corp SSL-inspection proxies will trip
+    ccxt calls with SSL_VERIFY errors and every symbol on affected exchanges
+    lands as ERROR."""
+    import truststore
+
+    calls: list[tuple] = []
+
+    def fake_inject() -> None:
+        calls.append(())
+
+    monkeypatch.setattr(truststore, "inject_into_ssl", fake_inject)
+
+    # Stub main() so run() short-circuits without touching argv / DB / ccxt.
+    monkeypatch.setattr(cli_module, "main", lambda: 0)
+
+    rc = run()
+    assert rc == 0
+    assert calls == [()], f"expected exactly one inject_into_ssl() call, got {len(calls)}"
+
+
+def test_run_survives_missing_truststore(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If truststore is uninstalled (or `inject_into_ssl` raises), run() must
+    log a warning and fall back to the bundled CA bundle rather than crashing.
+
+    Simulate the failure by making the import inside `_install_system_trust_store`
+    resolve to something whose `inject_into_ssl` raises. The simplest way is to
+    stub the real module's `inject_into_ssl` with a raising function."""
+    import truststore
+
+    def boom() -> None:
+        raise RuntimeError("simulated: truststore not usable")
+
+    monkeypatch.setattr(truststore, "inject_into_ssl", boom)
+    monkeypatch.setattr(cli_module, "main", lambda: 0)
+
+    with caplog.at_level("WARNING", logger="fh_symbol_check"):
+        rc = run()
+
+    assert rc == 0
+    assert any(
+        "truststore injection failed" in rec.message for rec in caplog.records
+    ), "expected a WARNING log about the truststore fallback"
+
+
+def test_run_returns_operational_failure_on_unhandled_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard the existing catch-all: the truststore step must not swallow
+    unrelated errors from main()."""
+    monkeypatch.setattr(cli_module, "main", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert run() == EXIT_OPERATIONAL_FAILURE

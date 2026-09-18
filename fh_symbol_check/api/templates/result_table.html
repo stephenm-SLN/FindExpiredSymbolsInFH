@@ -1,0 +1,57 @@
+{# Renders the result table for a completed job. Included from scan_card.html.
+   Client-side row filter (status chips) lets the user drill down without a
+   round-trip; the buttons flip a data-attribute the CSS reads.
+
+   `status_counts` is a dict[str,int] passed in by the view. `rows` is the
+   list of dicts from job.result_json. #}
+<div class="results" data-status="all">
+    <div class="status-filter">
+        <button type="button" data-status="all" class="active">All ({{ rows|length }})</button>
+        <button type="button" data-status="LISTED">LISTED ({{ status_counts.get("LISTED", 0) }})</button>
+        <button type="button" data-status="INACTIVE">INACTIVE ({{ status_counts.get("INACTIVE", 0) }})</button>
+        <button type="button" data-status="DELISTED">DELISTED ({{ status_counts.get("DELISTED", 0) }})</button>
+        <button type="button" data-status="ERROR">ERROR ({{ status_counts.get("ERROR", 0) }})</button>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>status</th>
+                <th>source</th>
+                <th>hostname</th>
+                <th>fh_name / app_name</th>
+                <th>exchange</th>
+                <th>original</th>
+                <th>ccxt</th>
+                <th>detail</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr data-status="{{ row.status }}">
+                <td><span class="status-pill status-{{ row.status }}">{{ row.status }}</span></td>
+                <td>{{ row.source }}</td>
+                <td>{{ row.hostname }}</td>
+                <td>{{ row.fh_name }}</td>
+                <td>{{ row.exchange_name }}</td>
+                <td><code>{{ row.original_symbol }}</code></td>
+                <td><code>{{ row.ccxt_symbol }}</code></td>
+                <td class="detail">{{ row.detail }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+<script>
+    // Tiny inline handler for the status chip filter. Kept vanilla so
+    // there's no JS dependency beyond HTMX itself.
+    (function () {
+        const container = document.currentScript.previousElementSibling;
+        container.querySelectorAll(".status-filter button").forEach(btn => {
+            btn.addEventListener("click", () => {
+                container.dataset.status = btn.dataset.status;
+                container.querySelectorAll(".status-filter button").forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+            });
+        });
+    })();
+</script>

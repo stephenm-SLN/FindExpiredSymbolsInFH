@@ -121,6 +121,90 @@ _POLYMARKETPERPS_BASE_REMAP: dict[str, str] = {
 }
 
 
+def _translate_ondoperps(s: str) -> str:
+    """FH internal ``<BASE>/<QUOTE>-PERP`` or ``<BASE>/<QUOTE>`` -> ``<BASE>-<QUOTE>.P``.
+
+    Ondo Perps names markets ``NVDA-USD.P`` / ``US100-USD.P``. The FH
+    stores the usual slash + ``-PERP`` form.
+
+    Examples:
+        "NVDA/USD-PERP" -> "NVDA-USD.P"
+        "US100/USD-PERP" -> "US100-USD.P"
+        "WTI/USD-PERP"  -> "WTI-USD.P"
+        "BTC-USD.P"     -> "BTC-USD.P"
+        "BTC/USD"       -> "BTC-USD.P"
+    """
+    suffix = "-PERP"
+    if s.endswith(suffix):
+        s = s[: -len(suffix)]
+    if "/" in s:
+        base, quote = s.split("/", 1)
+        s = f"{base}-{quote}"
+    if s and not s.endswith(".P"):
+        s = f"{s}.P"
+    return s
+
+
+def _translate_arcus(s: str) -> str:
+    """FH internal ``<BASE>/<QUOTE>-PERP`` or ``<BASE>/<QUOTE>`` -> ``<BASE>-<QUOTE>``.
+
+    Arcus names perps ``BTC-USD`` / ``AAPL-USD``. The FH stores the
+    usual slash + optional ``-PERP`` form.
+
+    Examples:
+        "BTC/USD-PERP" -> "BTC-USD"
+        "AAPL/USD-PERP" -> "AAPL-USD"
+        "BTC/USD"       -> "BTC-USD"
+        "BTC-USD"       -> "BTC-USD"
+    """
+    suffix = "-PERP"
+    if s.endswith(suffix):
+        s = s[: -len(suffix)]
+    if "/" in s:
+        base, quote = s.split("/", 1)
+        return f"{base}-{quote}"
+    return s
+
+
+def _translate_rhlighter(s: str) -> str:
+    """FH internal ``<BASE>/<QUOTE>-PERP`` or ``<BASE>-PERP`` -> ``<BASE>``.
+
+    Robinhood Lighter names perps as a bare base (``BTC``, ``ETH``).
+    Spot is already ``<BASE>/USDG`` and passes through unchanged.
+
+    Examples:
+        "BTC/USDG-PERP" -> "BTC"
+        "BTC/USDT-PERP" -> "BTC"
+        "BTC-PERP"      -> "BTC"
+        "META/USDG"     -> "META/USDG"
+    """
+    suffix = "-PERP"
+    if not s.endswith(suffix):
+        return s
+    base_quote = s[: -len(suffix)]
+    if "/" in base_quote:
+        return base_quote.split("/", 1)[0]
+    return base_quote
+
+
+def _translate_injective(s: str) -> str:
+    """FH internal ``<BASE>/<QUOTE>-PERP`` -> Injective ``<BASE>/<QUOTE> PERP``.
+
+    Injective's LCD names perps with a space (``BTC/USDC PERP``); the FH
+    stores the usual hyphen form. Spot symbols have no ``-PERP`` suffix
+    and pass through unchanged (``INJ/USDT``).
+
+    Examples:
+        "BTC/USDC-PERP" -> "BTC/USDC PERP"
+        "ETH/USDT-PERP" -> "ETH/USDT PERP"
+        "INJ/USDT"      -> "INJ/USDT"
+    """
+    suffix = "-PERP"
+    if not s.endswith(suffix):
+        return s
+    return f"{s[: -len(suffix)]} PERP"
+
+
 def _translate_polymarketperps(s: str) -> str:
     """FH internal "<BASE>/USDC-PERP" -> Polymarket Perps "<BASE>-USD".
 
@@ -149,6 +233,7 @@ def _translate_polymarketperps(s: str) -> str:
 
 
 TRANSLATORS: dict[str, Translator] = {
+    "ARCUS": _translate_arcus,
     "BINANCEDM": _translate_perp_suffix,
     "BINANCEDMCOIN": _translate_perp_suffix_inverse,
     "BITGETDM": _translate_perp_by_quote,
@@ -162,6 +247,7 @@ TRANSLATORS: dict[str, Translator] = {
     "GATEIODM": _translate_perp_suffix,
     "HUOBICOINSWAP": _translate_perp_suffix_inverse,
     "HUOBIDM": _translate_perp_suffix,
+    "INJECTIVE": _translate_injective,
     # KRAKENDM (krakenfutures) has 318 linear vs 14 inverse perps, both
     # USD-quoted. Defaulting to linear here since that's the bulk of the
     # universe; the 14 inverse markets will surface as DELISTED until/if
@@ -175,9 +261,11 @@ TRANSLATORS: dict[str, Translator] = {
     # linear <BASE>/USDT-PERP -> <BASE>/USDT:USDT (411 markets at check time),
     # inverse <BASE>/USD-PERP -> <BASE>/USD:<BASE> (15 markets at check time).
     "OKEX": _translate_perp_by_quote,
+    "ONDOPERPS": _translate_ondoperps,
     "PHEMEXDMCOIN": _translate_perp_suffix_inverse,
     "PHEMEXDMT": _translate_perp_suffix,
     "POLYMARKETPERPS": _translate_polymarketperps,
+    "RHLIGHTER": _translate_rhlighter,
     "WHITEBITDM": _translate_perp_suffix,
     "WOO": _translate_perp_suffix,
     "WOODEX": _translate_perp_suffix,

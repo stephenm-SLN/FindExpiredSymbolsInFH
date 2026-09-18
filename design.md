@@ -36,7 +36,8 @@
             │ exchange mapper  │──────►│ exchange_mapping.yaml │  (BINANCE→binance,
             │  + custom-venue  │       │                       │   HUOBIDM→htx, …)
             │     dispatch     │──────►│ custom_venues/ pkg    │  (NADO,
-            └────────┬─────────┘       └───────────────────────┘   POLYMARKETPERPS, …)
+            └────────┬─────────┘       └───────────────────────┘   POLYMARKETPERPS,
+                                                                    VERTEX family, …)
                      │
                      ▼
             ┌──────────────────┐
@@ -72,6 +73,31 @@
 
 Single-process, library-style modules glued together by a thin CLI entry point.
 
+The **API service** (see §12) is a second front-end on top of the same core.
+CLI and API both call `pipeline.run_scan()` — same DB fetch, same
+mapping/translation, same classification, same result rows. The only
+difference is what the front-end does with those rows: the CLI renders
+text/JSON/CSV and exits; the API stores them in an in-memory `JobStore`
+and lets clients poll or watch a live HTMX card in the browser.
+
+```
+                          ┌────────────────────────────┐
+                          │  pipeline.run_scan()       │
+                          │  (DB → tasks → classify)   │
+                          └───────▲────────┬───────────┘
+                                  │        │
+                     ┌────────────┘        └────────────┐
+                     │ synchronous                       │ async (in worker thread)
+              ┌──────┴──────┐                    ┌───────┴──────────┐
+              │  CLI (main) │                    │  API workers     │
+              └──────┬──────┘                    └───────┬──────────┘
+                     │                                   │
+                     ▼                                   ▼
+             reporter.render()                   JobStore (in-memory, TTL=1h)
+             → text/json/csv                    ├──► GET /scans/{id}   (JSON)
+             → stdout/file                      └──► GET / , /partial  (HTMX)
+```
+
 ## 2. Module Breakdown
 
 ```
@@ -82,26 +108,42 @@ FindExpiredSymbolsInFH/
 ├── fh_symbol_check/
 │   ├── __init__.py
 │   ├── cli.py                     # argparse + orchestration + run() console-script entry (--source flag)
+│   ├── pipeline.py                # run_scan() — the shared DB→classify path invoked by CLI and API workers
 │   ├── creds.py                   # load creds from YAML by section
 │   ├── db.py                      # parameterised queries: fetch_feed_handlers + fetch_repeaters
 │   ├── exchange_map.py            # load + lookup exchange_name → ccxt id (shared by both sources)
 │   ├── symbol_translation.py      # per-exchange_name translators (shared by both sources)
 │   ├── models.py                  # dataclasses: FeedHandlerRow, ResolvedTask, SymbolResult (all carry `source`)
-│   ├── validator.py               # build_tasks, classify_symbols, filter_by_symbol (source-agnostic)
+│   ├── validator.py               # build_tasks, classify_symbols (+ on_group_done cb), filter_by_symbol
 │   ├── reporter.py                # text/json/csv renderers; two-section detail + per-source summary tables
 │   ├── logging_config.py          # structured logging setup
 │   ├── data/
 │   │   └── exchange_mapping.yaml  # DB exchange_name → ccxt id; ships inside the wheel as package data
-│   └── custom_venues/             # non-ccxt venue checkers (registry-driven, see §3.9)
+│   ├── api/                       # optional REST + HTMX UI front-end (see §3.10 and §12)
+│   │   ├── main.py                #   find-expired-symbols-service console entry (argparse + uvicorn)
+│   │   ├── server.py              #   build_app() factory + TTL sweeper
+│   │   ├── routes.py              #   JSON API (POST /scans, GET /scans, GET /scans/{id}, GET /health)
+│   │   ├── views.py               #   HTMX endpoints (GET /, POST /, GET /scans/{id}/partial)
+│   │   ├── models.py              #   Pydantic schemas (ScanRequest, ScanJobDetail, …)
+│   │   ├── jobs.py                #   thread-safe in-memory JobStore + TTL sweep
+│   │   ├── workers.py             #   bounded ThreadPoolExecutor around pipeline.run_scan
+│   │   ├── templates/*.html       #   Jinja templates (base, home, scan_card, result_table, form_error)
+│   │   └── static/{htmx.min.js,app.css}  # bundled static assets; shipped as package data
+│   └── custom_venues/             # non-ccxt venue checkers (registry-driven, see §3.11)
 │       ├── __init__.py            #   CUSTOM_VENUES registry + helpers (is_custom_venue, get_checker)
+│       ├── arcus.py               #   Arcus (`https://api.arcus.xyz/v1/markets`)
+│       ├── injective.py           #   Injective LCD REST (spot + derivative)
 │       ├── nado.py                #   Nado (`https://archive.prod.nado.xyz/v2/symbols`)
-│       └── polymarket_perps.py    #   Polymarket Perps (`https://api.perpetuals.polymarket.com/v1/info/instruments`)
+│       ├── ondoperps.py           #   Ondo Perps (`https://api.ondoperps.xyz/v1/markets`)
+│       ├── polymarket_perps.py    #   Polymarket Perps (`https://api.perpetuals.polymarket.com/v1/info/instruments`)
+│       ├── rhlighter.py           #   Robinhood Chain Lighter (`https://api.rh.lighter.xyz/api/v1/orderBookDetails`)
+│       └── vertex.py              #   Vertex family — shut down July 2025; raises VenueGone, no network
 ├── check_delisted_symbol.py       # EXISTING — refactored (option B, §4.1); shipped in wheel via `py-modules`
 ├── mysql_select_query.py          # EXISTING — refactored (option C, §4.2); shipped in wheel via `py-modules`
 ├── deploy/
-│   └── shared-workspace-pixi.toml # template for the multi-user pixi workspace on the server
+│   └── find-expired-symbols.service  # systemd user unit template for the API service (see §11)
 ├── deploy.md                      # server runbook (see §11)
-├── tests/                         # pytest suite (includes test_packaging.py smoke checks)
+├── tests/                         # pytest suite (includes API tests + test_packaging.py smoke checks)
 └── .vscode/launch.json            # VS Code debug config
 ```
 
@@ -188,7 +230,7 @@ def resolve(mapping: dict[str, str], exchange_name: str) -> str | None: ...
   ```
 - Lives at `fh_symbol_check/data/exchange_mapping.yaml` and ships inside the built wheel as package data (see `pyproject.toml`'s `[tool.setuptools.package-data]`). The console script's `--exchange-map` default resolves to this file via `importlib.resources.files("fh_symbol_check")`, so an installed operator picks it up automatically. Overrideable with an explicit `--exchange-map /path/to/other.yaml`.
 - Lookup is **case-insensitive** on the DB key (DB values may drift in casing).
-- Custom venues (see §3.9) are checked **before** the exchange-map lookup in `build_tasks` — `NADO`, `POLYMARKETPERPS`, etc. never need to be in `exchange_mapping.yaml`. The map is for ccxt-backed venues only.
+- Custom venues (see §3.11) are checked **before** the exchange-map lookup in `build_tasks` — `NADO`, `POLYMARKETPERPS`, etc. never need to be in `exchange_mapping.yaml`. The map is for ccxt-backed venues only.
 - Unknown `exchange_name` (not in the map AND not in the custom-venue registry) → `resolve` returns `None`; the validator surfaces it as an `ERROR` row with `detail="unknown exchange_name=<X>; add it to exchange_mapping.yaml"`. The run continues.
 
 ### 3.4 `symbol_translation.py`
@@ -204,6 +246,10 @@ TRANSLATORS: dict[str, Translator] = {
     "BYBITDM": _translate_perp_by_quote,        # mixed linear+inverse by quote
     "NADO": _translate_perp_strip_quote,        # custom venue: BTC/USD-PERP → BTC-PERP
     "POLYMARKETPERPS": _translate_polymarketperps,  # GOLD/USDC-PERP → GOLD-USD
+    "INJECTIVE": _translate_injective,          # custom venue: BTC/USDC-PERP → BTC/USDC PERP
+    "RHLIGHTER": _translate_rhlighter,          # custom venue: BTC/USDG-PERP → BTC
+    "ARCUS": _translate_arcus,                  # custom venue: BTC/USD-PERP → BTC-USD
+    "ONDOPERPS": _translate_ondoperps,          # custom venue: NVDA/USD-PERP → NVDA-USD.P
     # … see source for the full list
 }
 
@@ -225,6 +271,10 @@ disambiguates these without collision.
 | `_translate_perp_by_quote` | linear OR inverse depending on quote | BITGETDM, BYBITDM |
 | `_translate_perp_strip_quote` | `BTC/USD-PERP` → `BTC-PERP` | NADO (custom venue) |
 | `_translate_polymarketperps` | `GOLD/USDC-PERP` → `GOLD-USD` (+ `WTI→WTIOIL` remap) | POLYMARKETPERPS (custom venue) |
+| `_translate_injective` | `BTC/USDC-PERP` → `BTC/USDC PERP` (spot identity) | INJECTIVE (custom venue) |
+| `_translate_rhlighter` | `BTC/USDG-PERP` → `BTC` (spot identity) | RHLIGHTER (custom venue) |
+| `_translate_arcus` | `BTC/USD-PERP` → `BTC-USD` | ARCUS (custom venue) |
+| `_translate_ondoperps` | `NVDA/USD-PERP` → `NVDA-USD.P` | ONDOPERPS (custom venue) |
 
 - Missing rule → identity. Logged at INFO once per `exchange_name` encountered, not per symbol.
 - Pure functions, trivially unit-testable. New venues are added by registering a primitive (or a new one) in `TRANSLATORS`.
@@ -355,6 +405,7 @@ def keep_fhs_with_errors(results: list[SymbolResult]) -> list[SymbolResult]:
 - Two entry points, both exit-code-returning:
   - `main(argv=None) -> int` — the argparse-driven orchestration; used by unit tests and by the source-tree launcher `find_expired_symbols.py`.
   - `run() -> int` — wraps `main()` with a `KeyboardInterrupt` handler (→ 130) and a catch-all exception guard (→ 2 with `logger.exception`). `run` is the `[project.scripts]` target in `pyproject.toml`, so both `pixi run python find_expired_symbols.py …` and the installed `find-expired-symbols` console script land on the same code path.
+  - Before dispatching to `main()`, `run()` calls `_install_system_trust_store()` which imports `truststore` and invokes `truststore.inject_into_ssl()`. This monkey-patches `ssl.create_default_context` so all subsequent HTTPS calls (ccxt + custom-venue urllib) honour the OS-native trust store (macOS Keychain / Linux system CA bundle / Windows cert store) instead of the Mozilla-only bundle that conda-forge Python ships with. This is what makes ccxt calls succeed on corp networks whose SSL-inspection proxy (Zscaler, Palo Alto, Netskope, …) re-signs HTTPS with an internal root CA — the corp root is in the OS store but not in Mozilla's. Missing / raising truststore is downgraded to a WARNING log; the tool falls back to the bundled bundle rather than crashing.
 - Module-level `DEFAULT_EXCHANGE_MAP: Path` is computed once via `importlib.resources.files("fh_symbol_check")` and used as the `--exchange-map` argparse default; source-tree and installed-wheel invocations resolve to the same on-disk file.
 - Parses args; loads creds + exchange map; orchestrates modules.
 - Filter args (at least one of the four required):
@@ -380,7 +431,161 @@ def keep_fhs_with_errors(results: list[SymbolResult]) -> list[SymbolResult]:
   - else → `0`
   - `KeyboardInterrupt` → `130`
 
-### 3.9 `custom_venues/` package
+### 3.9 `pipeline.py`
+
+Shared orchestration entry: the middle third of the CLI (DB fetch →
+`build_tasks` → optional `--symbol` filter → `classify_symbols`)
+extracted into a pure library function so the API's scan workers can
+call the same code path.
+
+Two data classes:
+
+- `ScanFilters` — the CLI's filter args translated into a frozen
+  dataclass (`hostname`, `exchange_name`, `all_producers`, `symbols`,
+  `source`, `concurrency`). `.validate()` reproduces argparse's
+  mutual-exclusion + at-least-one rules with the same error strings
+  used at the CLI. Callers (CLI, Pydantic layer at the HTTP boundary,
+  in-process tests) all funnel through this one validator so the
+  wording never diverges.
+- `ScanProgress` — an immutable snapshot the pipeline emits at four
+  phases (`querying_db`, `building_tasks`, `classifying`, `done`) plus
+  one tick per completed ccxt group during the classifying phase. The
+  progress callback is opt-in (`on_progress: Callable[[ScanProgress], None]
+  | None`), fires from the coordinator thread of `classify_symbols`
+  (see `on_group_done`), and swallows any exception so a misbehaving
+  observer can't kill the scan.
+
+`run_scan(filters, creds, exchange_map, *, on_progress=None) ->
+list[SymbolResult]`:
+
+1. `filters.validate()` — cheap safety net; callers usually validated
+   already.
+2. `_fetch_rows` — respects `filters.source`, logs the same
+   `no fh_config / no repeater_feeds rows matched` WARNINGs the CLI
+   used to emit inline, and lets `DBError` propagate unchanged. The
+   CLI catches it and returns exit 2; the API worker catches it and
+   marks the job `failed`.
+3. `build_tasks(rows, exchange_map)` — unchanged.
+4. `filter_by_symbol` if `filters.symbols` is non-empty — with the same
+   log lines as before (`matched N/M task(s)`, `0 occurrences found`).
+5. `classify_symbols(tasks, concurrency=…, on_group_done=<tick>)` — the
+   `on_group_done` callback bumps the progress counter and re-emits a
+   `ScanProgress` snapshot per completed ccxt group.
+6. Returns `early_errors + live_results` — the same shape the CLI used
+   to build inline.
+
+The CLI now delegates the whole DB→classify block to `run_scan` and
+keeps its argparse / logging / rendering / exit-code translation. The
+API workers construct `ScanFilters` from `ScanRequest`, submit
+`run_scan` to a `ThreadPoolExecutor`, and hook `on_progress` into the
+`JobStore` so HTMX polling sees live updates. Any bug fix in `run_scan`
+benefits both fronts in one commit.
+
+### 3.10 `api/` subpackage (optional service front-end)
+
+Adds a FastAPI service + HTMX browser UI that reuses `pipeline.run_scan`
+for the scan work. Kept as an optional install (extra CLI entry point,
+extra pixi task, extra systemd unit) so the base CLI still works
+unchanged for schedulers that don't need it.
+
+Module map (each intentionally single-purpose so the surface is easy
+to reason about):
+
+- `models.py` — Pydantic schemas.
+  `ScanRequest` mirrors the CLI's argparse fields (same names, same
+  validation error wording via `@model_validator`). `.to_filters()`
+  produces a `ScanFilters`. `ScanJobSummary` / `ScanJobDetail` /
+  `ProgressOut` / `SymbolResultOut` are the shapes clients see; the
+  JSON round-trips with the CLI's `--output json` payload so machine
+  consumers can share code across fronts. `extra="forbid"` on
+  `ScanRequest` catches typos early.
+- `jobs.py` — in-memory `JobStore` guarded by a `threading.RLock`.
+  One dataclass `Job` per `POST /scans`, keyed by a UUID4 hex. State
+  machine: `queued → running → done|failed`. `sweep()` evicts
+  completed jobs whose `completed_at` is older than TTL (default 1h);
+  in-flight jobs are never swept. Attempting to update a job that's
+  been swept is a no-op logged at DEBUG — that's the race the worker
+  can hit under contention and it must not crash the scan.
+- `workers.py` — `ScanWorkers` owns a bounded `ThreadPoolExecutor`
+  (default `max_workers=2`, tunable via
+  `--max-concurrent-scans`). `.submit(filters, request_dump)` creates
+  a `Job`, schedules `_run_job`, and returns the queued record.
+  `_run_job` (on a pool thread): `mark_running` → `run_scan(…,
+  on_progress=…)` → `mark_done(result_json=[asdict(r) for r in …])` or
+  `mark_failed(error="<Type>: <msg>")`. The `on_progress` callback
+  writes into the `JobStore`, so polling clients see the counter tick
+  as each ccxt group finishes.
+- `routes.py` — the JSON API surface.
+  `POST /scans` → 202 + `Location: /scans/{id}` header + summary body.
+  `GET /scans` → list of summaries, newest first.
+  `GET /scans/{id}` → detail with `result: list[SymbolResultOut] |
+  null` (populated once `state == "done"`).
+  `GET /health` → `{status, version, active_scans, recent_scans}`.
+  All routes read `store` / `workers` off `request.app.state`
+  (populated by the factory in `server.py`) so tests can swap in
+  different creds / maps / TTLs without touching module globals.
+- `views.py` — the HTMX endpoints.
+  `GET /` renders `home.html` (form + list of recent jobs). `POST /`
+  parses the form-encoded body, converts to `ScanRequest`, and — on
+  validation failure — returns the `form_error.html` partial with the
+  CLI wording; on success returns the `scan_card.html` partial for
+  the newly-submitted job for HTMX to insert at the top of the list.
+  `GET /scans/{id}/partial` is the polling target; while `state in
+  (queued, running)` the card carries `hx-get + hx-trigger="every
+  1s"`, so it self-polls. When the swap replaces it with a done /
+  failed version those attributes disappear and polling stops
+  naturally. A swept-during-poll job returns an empty body → HTMX
+  removes the card.
+- `server.py` — the factory.
+  `build_app(creds, exchange_map, *, job_ttl_seconds, max_concurrent_scans,
+  sweep_interval_seconds, static_dir, templates_dir)` — every dep is
+  passed in explicitly (no globals) so tests can drive isolated apps.
+  Registers a lifespan-managed background asyncio task that calls
+  `store.sweep()` on a fixed interval. Mounts `/static` iff the
+  packaged static directory exists on disk (a wheel without the
+  Checkpoint 3 assets would otherwise 500 on `/static/*`; graceful
+  degrade to 404 is friendlier).
+- `main.py` — the console script `find-expired-symbols-service`.
+  argparse args mirror the CLI's creds / log flags plus service-specific
+  ones (`--bind`, `--port`, `--job-ttl-seconds`, `--max-concurrent-scans`).
+  Reuses `fh_symbol_check.cli._install_system_trust_store` so any ccxt
+  call the worker makes benefits from the OS-native trust store on
+  corp networks. Blocks on `uvicorn.run(app, host=…, port=…)` until
+  the process is signalled.
+
+Templates (all under `fh_symbol_check/api/templates/`, shipped as
+package data):
+
+- `base.html` — HTML shell; loads `/static/htmx.min.js` and
+  `/static/app.css`. Header with app name / API-docs / recent-scans
+  links; footer with version + job-TTL note.
+- `home.html` — extends `base.html`; filter form (source / hostname /
+  exchange_name / symbol / concurrency + checkboxes for all /
+  show_listed / errors_only), then a scans list that's the HTMX
+  target for `POST /`.
+- `scan_card.html` — one card for one job. State-aware:
+  `queued` / `running` shows a progress bar + phase / rows-scanned /
+  N/M exchanges text and carries the polling triggers;
+  `done` shows completion time + row count + a JSON link + the
+  result table; `failed` shows the error string in a red panel.
+- `result_table.html` — status-filter chip row (`All`, `LISTED`,
+  `INACTIVE`, `DELISTED`, `ERROR`) plus a stripped-down table with
+  status + source + hostname + fh_name + exchange + original + ccxt +
+  detail. A ~15-line inline `<script>` toggles a `data-status`
+  attribute on the container; a CSS attribute selector hides
+  non-matching rows. No JS framework dependency beyond HTMX itself.
+- `form_error.html` — inline validation error card returned in place
+  of a scan card when the form fails Pydantic validation.
+
+Static assets (shipped as package data):
+
+- `htmx.min.js` — HTMX 1.9.12, MIT-licensed, ~48KB minified. Vendored
+  intentionally so the browser never hits a CDN.
+- `app.css` — ~200 lines. CSS variables for light/dark theme
+  (`prefers-color-scheme: dark`), status pills, progress bar,
+  responsive form grid.
+
+### 3.11 `custom_venues/` package
 
 Non-ccxt venues (FH-side exchanges that ccxt does not implement) are
 supported through a registry-driven framework rather than per-venue
@@ -394,6 +599,15 @@ CustomVenueChecker = Callable[[], Mapping[str, bool]]
 CUSTOM_VENUES: dict[str, CustomVenueChecker] = {
     "NADO": nado.fetch_symbols,
     "POLYMARKETPERPS": polymarket_perps.fetch_symbols,
+    "INJECTIVE": injective.fetch_symbols,
+    "RHLIGHTER": rhlighter.fetch_symbols,
+    "ARCUS": arcus.fetch_symbols,
+    "ONDOPERPS": ondoperps.fetch_symbols,
+    "VERTEX": vertex.fetch_vertex,
+    "AVAVERTEX": vertex.fetch_avavertex,
+    "BERAVERTEX": vertex.fetch_beravertex,
+    "MNTVERTEX": vertex.fetch_mntvertex,
+    "SOVERTEX": vertex.fetch_sovertex,
 }
 
 CUSTOM_VENUE_PREFIX = "custom:"   # sentinel prefix on ResolvedTask.ccxt_id
@@ -436,14 +650,22 @@ The checker is the single source of truth for that venue's universe:
    routes to `_classify_custom_venue(custom_id, group)`.
 3. `_classify_custom_venue` calls the checker **once** for the whole
    group, then per-task classifies as LISTED / INACTIVE / DELISTED.
+   A checker that raises `VenueGone` (venue permanently shut down)
+   emits DELISTED for every task with the exception message as
+   `detail` — not ERROR.
 
 #### Shipped checkers
 | FH `exchange_name` | Endpoint | Live signal | Translator |
 |---|---|---|---|
 | `NADO` | `GET https://archive.prod.nado.xyz/v2/symbols` | `trading_status == "live"` | `_translate_perp_strip_quote` |
 | `POLYMARKETPERPS` | `GET https://api.perpetuals.polymarket.com/v1/info/instruments` | every returned instrument is treated as live (no status field) | `_translate_polymarketperps` |
+| `VERTEX` / `AVAVERTEX` / `BERAVERTEX` / `MNTVERTEX` / `SOVERTEX` | **No fetch.** Vertex Protocol shut down July 2025 (Ink Foundation merger). Checker raises `VenueGone`; validator emits `DELISTED` for every task. Former hosts `archive.*.vertexprotocol.com` are recorded only so the detail can name them. | n/a (venue gone) | passthrough |
+| `INJECTIVE` | `GET https://sentry.lcd.injective.network/injective/exchange/v1beta1/{spot,derivative}/markets?status={Active,Paused,Expired}` (6 calls; `Demolished` omitted so those classify as DELISTED) | `status == "Active"` | `_translate_injective` (`BTC/USDC-PERP` → `BTC/USDC PERP`; spot identity) |
+| `RHLIGHTER` | `GET https://api.rh.lighter.xyz/api/v1/orderBookDetails` — Robinhood Chain Lighter, **not** ccxt `lighter` / mainnet | `status == "active"` | `_translate_rhlighter` (`BTC/USDG-PERP` / `BTC-PERP` → `BTC`; spot identity) |
+| `ARCUS` | `GET https://api.arcus.xyz/v1/markets` — dYdX Labs DEX, not in ccxt | `status == "ONLINE"` | `_translate_arcus` (`BTC/USD-PERP` → `BTC-USD`) |
+| `ONDOPERPS` | `GET https://api.ondoperps.xyz/v1/markets` — Ondo Perps, not in ccxt | every returned `tradingPairs` entry is treated as live (no status field) | `_translate_ondoperps` (`NVDA/USD-PERP` → `NVDA-USD.P`) |
 
-Both checkers ship with a `User-Agent: FindExpiredSymbolsInFH/1.0 (symbol-validation)`
+All checkers ship with a `User-Agent: FindExpiredSymbolsInFH/1.0 (symbol-validation)`
 header (Nado's WAF blocks the default `Python-urllib/3.x`).
 
 ## 4. Integration with the Two Helper Scripts (refactors completed)
@@ -485,6 +707,7 @@ def classify(markets: dict, symbol: str) -> tuple[Literal["LISTED","INACTIVE","D
 | Translator | no rule for `exchange_name` | identity, log DEBUG once per `exchange_name` |
 | Validator (ccxt) | per-exchange `ccxt.NetworkError` / `ExchangeError` / `MarketLoadError` | all that exchange's tasks → `ERROR` rows, run continues |
 | Validator (custom venue) | checker raises (HTTP / parse failure) | all that venue's tasks → `ERROR` rows with `detail="custom venue fetch failed: …"`, run continues |
+| Validator (custom venue) | checker raises `VenueGone` (venue permanently shut down) | all that venue's tasks → `DELISTED` with the shutdown message as `detail` |
 | Validator (custom venue) | checker not registered for sentinel `custom:X` | all that venue's tasks → `ERROR` rows, run continues |
 | Reporter | I/O error on `--output-file` | log + exit `2` |
 | Anywhere | unexpected exception | logged with stack trace at ERROR, exit `2` |
@@ -522,6 +745,11 @@ grows with the project; see `pytest -q` for the current total. Files:
 - `test_cli.py` — argparse-level acceptance of every permitted flag combination; preservation of the `--all` vs `--hostname`/`--exchange-name` exclusivity rule; widened "at least one of" gate accepting `--symbol`; `--source` accepts `fh`/`rp`/`both`, defaults to `both`, and rejects unknown choices.
 - `test_custom_venues_nado.py` — fixture-JSON `_parse_symbols`, network mocking for `fetch_symbols`, happy path / invalid JSON / network errors.
 - `test_custom_venues_polymarket_perps.py` — same shape, against the Polymarket Perps instrument-list fixture.
+- `test_custom_venues_vertex.py` — historical `_parse_symbols` fixture tests kept; `_EDGES` distinct-hostname + expected-subdomain checks; `CUSTOM_VENUES` registration; `_fetch` raises `VenueGone` naming the edge and former host (no network); unknown edge still `KeyError`.
+- `test_custom_venues_injective.py` — LCD spot + derivative parser (Active/Paused/Expired/Demolished, trailing-space ticker strip, wrapped vs unwrapped market dicts), 6-URL fetch composition (3 statuses × 2 kinds, Demolished omitted), Active-wins-over-Paused merge, UA + Accept headers, invalid-JSON / network-error (URL in message), `CUSTOM_VENUES` registration.
+- `test_custom_venues_rhlighter.py` — RH Lighter parser (perp + spot, active/inactive, ticker strip), fetch URL + headers, invalid-JSON / network-error (URL in message), `CUSTOM_VENUES` registration.
+- `test_custom_venues_arcus.py` — Arcus parser (ONLINE/OFFLINE, ticker strip), fetch URL + headers, invalid-JSON / network-error (URL in message), `CUSTOM_VENUES` registration.
+- `test_custom_venues_ondoperps.py` — Ondo Perps parser (market field, ticker strip, success=false), fetch URL + headers, invalid-JSON / network-error (URL in message), `CUSTOM_VENUES` registration.
 - `test_packaging.py` — smoke checks for the pip-installable packaging contract: `run` is importable and is the exact callable that `pyproject.toml`'s `[project.scripts]` points at; `--help` succeeds and mentions every filter flag; `DEFAULT_EXCHANGE_MAP` exists on disk, lives inside `fh_symbol_check/data/`, and loads as a `{str: str}` YAML dict; exit-code constants are frozen at `0/1/2/130`.
 
 Manual smoke tests against the real host are documented in `task.md`.
@@ -542,7 +770,7 @@ Status legend: ✅ done, ⏳ open.
 5. ✅ **Type checking + lint**: `mypy` (per `mypy.ini`) and `ruff` are now part of the gate set; both pass.
 6. ⏳ **Pre-commit hook**: block commits that contain the literal password from `.DBCreds.yaml`.
 7. ⏳ **Schema drift guard**: at startup, `DESCRIBE crypto_db.fh_config` and assert the expected columns exist; print a clear error if the schema changes.
-8. **Custom-venue framework** (done — §3.9): registry-driven non-ccxt venues with per-venue checkers; Nado and Polymarket Perps shipped, more parked in `task.md` pending FH-side input.
+8. **Custom-venue framework** (done — §3.11): registry-driven non-ccxt venues with per-venue checkers; Nado, Polymarket Perps, Injective, Robinhood Lighter, Arcus, Ondo Perps, and the Vertex family shipped, more parked in `task.md` pending FH-side input.
 
 ## 10. Risks
 
@@ -556,7 +784,137 @@ Status legend: ✅ done, ⏳ open.
 
 Architecture-level notes only — operational detail lives in `deploy.md`.
 
-- **Packaging shape**: pip-installable distribution declared in `pyproject.toml`. Building `pixi run -e dev python -m build --wheel` produces a wheel that bundles the `fh_symbol_check` package, the two top-level helpers (`check_delisted_symbol.py`, `mysql_select_query.py` via `[tool.setuptools] py-modules`), and the code-tracked `data/exchange_mapping.yaml` as package data.
-- **Console script**: `[project.scripts]` maps `find-expired-symbols` → `fh_symbol_check.cli:run`. That's the single entry point operators call.
-- **Server model**: the recommended deploy is a shared pixi workspace at `/opt/find-expired-symbols/` (template: `deploy/shared-workspace-pixi.toml`) that installs the wheel into a conda-forge Python. This sidesteps host-Python issues (missing `venv`/`ensurepip`, older glibc, `manylinux_2_28` mismatches with the `cryptography` PyPI wheel). See `deploy.md` for the full runbook.
-- **Scheduler contract**: `absolute path + CLI flags + exit code`. Exit codes (`0/1/2/130`) are frozen by `tests/test_packaging.py::test_exit_codes_exported` — anything the scheduler branches on stays stable across releases.
+- **Packaging shape**: pip-installable distribution declared in `pyproject.toml`. Building `pixi run -e dev python -m build --wheel` produces a wheel that bundles the `fh_symbol_check` package (including `api/`), the two top-level helpers (`check_delisted_symbol.py`, `mysql_select_query.py` via `[tool.setuptools] py-modules`), the code-tracked `data/exchange_mapping.yaml`, and the API's Jinja templates + static assets (`htmx.min.js`, `app.css`) as package data.
+- **Console scripts**: `[project.scripts]` maps two entry points — `find-expired-symbols` → `fh_symbol_check.cli:run` (the CLI, unchanged) and `find-expired-symbols-service` → `fh_symbol_check.api.main:run` (the API service). Operators pick either or both.
+- **Server model**: deploy is a user-chosen directory (`/opt/find-expired-symbols/`, `/home/<user>/api/find-expired-symbols/`, etc.) containing the built wheel + the repo's own `pixi.toml` + `pixi.lock` (rsync'd verbatim). A dedicated `find-expired-symbols` pixi environment declared in `pixi.toml` provides the Python interpreter and every runtime dep from conda-forge (Python, `pymysql`, `pyyaml`, `truststore`, `cryptography`, `pip`, `fastapi`, `uvicorn-standard`, `jinja2`, `python-multipart`) plus `ccxt` from PyPI. The wheel is installed on top with `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall …`, which lets the same five steps serve both fresh installs and updates. Sourcing `cryptography` from conda-forge sidesteps the `manylinux_2_28` mismatch with the conda-forge Python's `manylinux_2_26` wheel tag; `pip` in `[dependencies]` is what makes the `pip install` step work at all (pixi conda envs otherwise ship without pip). The API service is supervised via `deploy/find-expired-symbols.service` — a systemd **user** unit invoked with `systemctl --user enable --now` + `loginctl enable-linger`. See `deploy.md` for the full runbook.
+- **Scheduler contract**: `absolute path + CLI flags + exit code`. Exit codes (`0/1/2/130`) are frozen by `tests/test_packaging.py::test_exit_codes_exported` — anything the scheduler branches on stays stable across releases. Machine consumers can equivalently `POST /scans` to the API and poll `GET /scans/{id}` for state; both routes converge on the same result rows.
+
+## 12. Service architecture (API + HTMX UI)
+
+The service is a **second front-end** on top of the pipeline — nothing in
+`pipeline.py` or below knows about HTTP. It exists because interactive
+users (browser) and machine consumers (other services) both wanted an
+on-demand scan surface that doesn't require SSH + CLI. The trade-off
+is deliberate: no persistence, no auth, no cross-node coordination.
+
+**Non-goals for v1** (spelled out here so they don't accidentally
+happen later):
+
+- Persistent storage — jobs and results live in a `dict[str, Job]` and
+  are dropped 1h after completion, or on process restart.
+- Authentication — none. Rely on the network perimeter / a reverse proxy.
+- Multi-node — one process, one memory space. Horizontal scaling would
+  require moving `JobStore` to shared storage (Redis, Postgres); out of
+  scope.
+- Cancellation of an in-flight scan — no `DELETE /scans/{id}`. Users
+  who really need this can `systemctl --user restart` and lose ~15s of
+  work.
+- WebSockets / SSE — HTMX polling (1s) is good enough at v1 scan durations
+  (seconds to a few minutes), removes an entire failure mode
+  (long-lived connections through corp proxies), and keeps the client-side
+  code to zero JS.
+
+### 12.1 Request lifecycle
+
+```
+   POST /scans (JSON)                             POST / (form)
+       │                                              │
+       │  ScanRequest.model_validate                  │  Form(...) fields → ScanRequest
+       │  ↓                                           │  ↓
+       └──────────►  ScanRequest.to_filters() ────────┘
+                              │
+                              ▼
+                     ScanWorkers.submit(filters, request_dump)
+                              │
+                              │  (thread pool, bounded)
+                              ▼
+                     Job (state=queued) → JobStore
+                              │
+                              ▼
+                     store.mark_running(job.id)
+                              │
+                              ▼
+                     pipeline.run_scan(filters, creds, exchange_map,
+                                       on_progress=lambda p: store.update_progress(...))
+                              │
+                              │  every ccxt group finished:
+                              │  store.update_progress(job.id, ScanProgress(…))
+                              │
+                              ▼
+                     store.mark_done(job.id, result_json=[asdict(r) for r in …])
+                              │
+                              ▼
+                    (poll target)
+                              │
+   GET /scans/{id}    ────────┼───►   ScanJobDetail (JSON)
+                              │
+   GET /scans/{id}/partial ───┴───►   scan_card.html (state-aware HTML)
+
+   TTL sweeper (asyncio task, every 60s):
+        for j in store where j.completed_at < now - TTL: del store[j.id]
+```
+
+### 12.2 Concurrency model
+
+Two independent pools stack up:
+
+1. **API scan pool** (`ScanWorkers._executor`, default 2 workers) —
+   caps how many scans run in parallel at the service level. Each
+   worker runs `pipeline.run_scan` on one job for its full lifetime.
+2. **ccxt exchange pool** (`validator.classify_symbols` internal
+   `ThreadPoolExecutor`, default 4 workers per scan) — caps how many
+   `load_markets()` calls fly in parallel *within* one scan.
+
+Nesting is deliberate: the outer pool bounds server-wide fan-out;
+the inner pool bounds per-scan fan-out. Worst case: `2 × 4 = 8`
+concurrent `load_markets` calls plus 2 coordinator threads. The
+`GIL` isn't the bottleneck — this is all I/O-bound HTTP.
+
+`JobStore` uses `threading.RLock`; every mutation is atomic. Progress
+callbacks fire from the coordinator thread of `classify_symbols` (the
+`as_completed` loop), which lives inside the top-level `ScanWorkers`
+thread — so ordering is well-defined: `mark_running` before any
+`update_progress`, `update_progress` monotonic on `completed_producers`,
+`mark_done`/`mark_failed` last.
+
+### 12.3 HTMX interaction pattern
+
+The UI leans on one HTMX capability: **polling that stops itself when
+the swapped-in element no longer has an `hx-trigger` attribute**.
+
+- `POST /` returns a `scan_card.html` fragment. If the job is
+  `queued` / `running`, that fragment carries
+  `hx-get="/scans/{id}/partial" hx-trigger="every 1s"
+  hx-swap="outerHTML"`. HTMX polls itself.
+- Each poll returns the current state. While still running, the
+  swapped-in element has the same hx-* attrs, so polling continues.
+- When `state == "done"` or `"failed"`, the returned fragment has
+  **no** hx-* attrs. HTMX swaps in, polling stops naturally.
+- If the job was TTL-swept during polling, `GET /scans/{id}/partial`
+  returns an empty body — HTMX replaces the card with nothing and
+  stops polling.
+
+This gives us live updates without WebSockets, without long polling,
+without a single line of custom JavaScript beyond the ~15-line inline
+status-chip filter in `result_table.html`.
+
+### 12.4 Testing surface
+
+Test files stack the same way as the module split:
+
+- `tests/test_api_models.py` — Pydantic validation. Locks the CLI /
+  API error-string parity.
+- `tests/test_api_jobs.py` — `JobStore` state machine, TTL sweep,
+  concurrent-update thread safety.
+- `tests/test_api_routes.py` — end-to-end JSON API via `TestClient`;
+  stubs `pipeline.fetch_feed_handlers` / `pipeline.fetch_repeaters`
+  and `validator.load_exchange_markets_safe` so scans run offline in
+  milliseconds. Checks 202 + Location header, poll-to-done, DB-error
+  path, 404 on unknown id.
+- `tests/test_api_templates.py` — HTMX rendering; asserts on:
+  form present + HTMX bootstrap + empty state; scan card has polling
+  trigger while running; done card has result rows and no trigger;
+  form_error partial carries the CLI wording; static assets serve.
+- `tests/test_packaging.py::test_service_run_is_a_second_console_script_entry_point`
+  — locks the `find-expired-symbols-service = fh_symbol_check.api.main:run`
+  entry point so a rename can't silently break the systemd unit.

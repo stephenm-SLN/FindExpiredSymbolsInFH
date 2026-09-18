@@ -1,0 +1,62 @@
+# User-scoped systemd unit for the find-expired-symbols API service.
+#
+# Install:
+#   1. Copy to ~/.config/systemd/user/find-expired-symbols.service
+#      and edit `WorkingDirectory=` to your $FES_DIR.
+#   2. `systemctl --user daemon-reload`
+#   3. `systemctl --user enable --now find-expired-symbols`
+#   4. `sudo loginctl enable-linger $USER` — so it starts on boot without
+#      an active login session.
+#
+# Update:
+#   After each `pixi run -e find-expired-symbols pip install --no-deps ...`
+#   run `systemctl --user restart find-expired-symbols` to pick up the
+#   new wheel.
+#
+# Logs:
+#   `journalctl --user -u find-expired-symbols -f`
+
+[Unit]
+Description=find-expired-symbols API service
+Documentation=https://github.com/stephenm-SLN/FindExpiredSymbolsInFH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+
+# Set to your $FES_DIR — the same directory that holds pixi.toml,
+# pixi.lock, and .DBCreds.yaml. `%h` expands to the invoking user's home.
+WorkingDirectory=%h/api/find-expired-symbols
+
+# Run the env console script directly (same pattern as irq-service).
+# Do not call `pixi run` from systemd: (1) pixi is often at
+# /usr/local/bin/pixi, not %h/.pixi/bin/pixi, which yields 203/EXEC;
+# (2) `pixi run` may try to refresh conda-forge on every start.
+# If $FES_DIR is not %h/api/find-expired-symbols, edit both
+# WorkingDirectory= and this ExecStart= to match.
+ExecStart=%h/api/find-expired-symbols/.pixi/envs/find-expired-symbols/bin/find-expired-symbols-service \
+    --creds-file %h/api/find-expired-symbols/.DBCreds.yaml \
+    --bind 127.0.0.1 \
+    --port 8000
+
+# Restart on any non-zero exit; give the process 5s between attempts so
+# a bad config / bad creds don't spin the pool.
+Restart=on-failure
+RestartSec=5s
+
+# Graceful shutdown: uvicorn handles SIGTERM cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# Environment overrides. Uncomment and edit if you need to tune the
+# service without changing the unit's command line.
+#Environment=FES_JOB_TTL_SECONDS=3600
+#Environment=FES_MAX_CONCURRENT_SCANS=2
+
+# Journal captures both stdout and stderr; grep with `journalctl -u`.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

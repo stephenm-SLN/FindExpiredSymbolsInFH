@@ -15,6 +15,35 @@ extra-index-urls = ["https://nexus.selini.tech/repository/pypi-hosted/simple"]
 python = ">=3.10,<3.14"
 pymysql = ">=1.1"
 pyyaml = ">=6"
+# truststore makes Python use the OS-native trust store (macOS Keychain,
+# Linux system CA bundle, Windows cert store) instead of the bundled
+# Mozilla-only cert.pem. Required so ccxt calls succeed on corp networks
+# where SSL-inspection proxies (e.g. Zscaler) intercept HTTPS traffic and
+# resign it with an internal root CA that IT has already added to the OS
+# trust store.
+truststore = ">=0.10"
+# cryptography is pulled in transitively by ccxt. Its recent PyPI wheels
+# require manylinux_2_28 (glibc 2.28+), but the conda-forge Python pixi
+# installs advertises manylinux_2_26 as its top-supported tag — so on
+# the deploy server pip/uv can't find a compatible wheel and `pixi
+# install` fails. Sourcing cryptography from conda-forge sidesteps the
+# wheel-tag mismatch (same glibc as the interpreter). Declared globally
+# so dev and deploy resolve to the same source of truth.
+cryptography = "*"
+# pip is required inside the deploy env so
+#   pixi run -e find-expired-symbols pip install --no-deps --force-reinstall <wheel>
+# works. Pixi conda envs don't ship pip by default. Declared globally
+# so `python -m pip …` also works in dev when needed.
+pip = "*"
+# API service stack. All available on conda-forge, so we source them
+# there for the same manylinux-safety reasons as the rest of the C-adjacent
+# deps. uvicorn's `[standard]` PyPI extra pulls httptools + uvloop +
+# websockets + watchfiles; the conda-forge `uvicorn-standard` metapackage
+# is the equivalent.
+fastapi = ">=0.100"
+uvicorn-standard = ">=0.20"
+jinja2 = ">=3.1"
+python-multipart = ">=0.0.6"
 
 [pypi-dependencies]
 ccxt = ">=4"
@@ -29,5 +58,24 @@ types-PyYAML = "*"
 types-PyMySQL = "*"
 build = "*"
 
+# Server-side env. Runtime deps come from [dependencies] +
+# [pypi-dependencies]; the find-expired-symbols wheel itself is
+# installed on top with `pip install --no-deps --force-reinstall` (see
+# deploy.md). Keeping the wheel out of the manifest means version bumps
+# don't require editing this file.
+#
+# The task alias prefills the DB creds path. $PIXI_PROJECT_ROOT is set
+# by pixi at task run-time to the directory containing this pixi.toml,
+# so the install is relocatable — /opt/find-expired-symbols/,
+# /home/<user>/api/find-expired-symbols/, or anywhere else all work
+# without editing. argparse takes the last value for duplicated flags,
+# so users can still override with their own `--creds-file <path>`.
+[feature.find-expired-symbols.tasks]
+find-expired-symbols = "find-expired-symbols --creds-file $PIXI_PROJECT_ROOT/.DBCreds.yaml"
+# Service task: same creds-path pre-fill as the CLI. Users override
+# --bind / --port on the command line; systemd invokes this directly.
+find-expired-symbols-service = "find-expired-symbols-service --creds-file $PIXI_PROJECT_ROOT/.DBCreds.yaml"
+
 [environments]
 dev = ["dev"]
+find-expired-symbols = ["find-expired-symbols"]

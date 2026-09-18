@@ -11,7 +11,8 @@ Concrete "how" — files, signatures, libraries, CLI shape, exit codes. Assumes 
 | `find_expired_symbols.py` | Source-checkout entry point — 3-line wrapper: `from fh_symbol_check.cli import run; if __name__ == "__main__": sys.exit(run())`. |
 | `fh_symbol_check/data/exchange_mapping.yaml` | DB `exchange_name` → ccxt id. Code-tracked. Bundled inside the wheel as package data so an installed operator gets it for free. Overrideable with `--exchange-map`. |
 | `fh_symbol_check/__init__.py` | Empty package marker. |
-| `fh_symbol_check/cli.py` | Argparse + orchestration + `main()` + `run()` (console-script entry point); `DEFAULT_EXCHANGE_MAP` resolved via `importlib.resources`. |
+| `fh_symbol_check/cli.py` | Argparse + orchestration + `main()` + `run()` (console-script entry point); `DEFAULT_EXCHANGE_MAP` resolved via `importlib.resources`. `run()` calls `_install_system_trust_store()` (`truststore.inject_into_ssl()`, best-effort) before `main()` so ccxt/urllib HTTPS calls honour the OS trust store — necessary on corp networks whose SSL-inspection proxy re-signs traffic with an internal root CA that isn't in Python's Mozilla bundle. The DB-fetch → build_tasks → classify middle now delegates to `pipeline.run_scan` so the API service reuses the exact code path. |
+| `fh_symbol_check/pipeline.py` | Shared orchestration entry: `run_scan(filters, creds, exchange_map, *, on_progress=None) -> list[SymbolResult]`, `ScanFilters` (frozen dataclass mirroring the CLI's argparse fields; `.validate()` reproduces the argparse error strings), `ScanProgress` (immutable snapshot per phase / ccxt-group completion), `describe_filters(filters) -> str` (log-line helper shared by CLI and API). No argparse / HTTP concerns — pure library. |
 | `fh_symbol_check/creds.py` | `load_creds(path, section)`, `DBCreds`, `CredsError`. |
 | `fh_symbol_check/db.py` | `fetch_feed_handlers(creds, hostname_pattern=None, *, exchange_name=None)` + `fetch_repeaters(creds, ...)` (same signature, queries `crypto_db.repeater_feeds`, returns `FeedHandlerRow`s with `source="repeater"` and `service_id=None`); `DBError`. |
 | `fh_symbol_check/exchange_map.py` | `load_exchange_map(path)`, `resolve(mapping, exchange_name)`, `ExchangeMapError`. |
@@ -23,8 +24,33 @@ Concrete "how" — files, signatures, libraries, CLI shape, exit codes. Assumes 
 | `fh_symbol_check/custom_venues/__init__.py` | `CUSTOM_VENUES` registry, `is_custom_venue`, `custom_id_for`, `get_checker`, `CUSTOM_VENUE_PREFIX`. |
 | `fh_symbol_check/custom_venues/nado.py` | Nado checker (`fetch_symbols()`), `User-Agent`-spoofed `urllib`. |
 | `fh_symbol_check/custom_venues/polymarket_perps.py` | Polymarket Perps checker (`fetch_symbols()`), same shape. |
-| `deploy/shared-workspace-pixi.toml` | Template pixi manifest for the shared server workspace at `/opt/find-expired-symbols/` (see `deploy.md`). Pins `cryptography` to conda-forge to sidestep the `manylinux_2_28` PyPI wheel; declares the `find-expired-symbols` pixi task and points `--creds-file` at `/opt/find-expired-symbols/.DBCreds.yaml`. |
-| `deploy.md` | End-to-end runbook: build wheel → ship → bootstrap Python via pixi → shared install workspace → creds → permissions → smoke test → scheduler wiring → upgrade → uninstall → troubleshooting. |
+| `fh_symbol_check/custom_venues/vertex.py` | Vertex family checker (Arbitrum / Avalanche / Berachain / Mantle / Sonic). **Venue shut down July 2025** (Ink Foundation merger). `_fetch` raises `VenueGone` and does not hit the former `archive.*.vertexprotocol.com` hosts. Validator emits `DELISTED` with the shutdown reason. Historical `_parse_symbols` kept for fixture tests. |
+| `fh_symbol_check/custom_venues/injective.py` | Injective (Helix) checker. Hits the public LCD REST (`sentry.lcd.injective.network`) for spot + derivative markets at `Active` / `Paused` / `Expired` (6 GETs). `Demolished` is not fetched so those classify as DELISTED. `_translate_injective` turns FH `BTC/USDC-PERP` into venue `BTC/USDC PERP`. |
+| `fh_symbol_check/custom_venues/rhlighter.py` | Robinhood Chain Lighter checker (`api.rh.lighter.xyz/api/v1/orderBookDetails`). Separate book from ccxt `lighter` / mainnet. `_translate_rhlighter` turns FH `BTC/USDG-PERP` into venue `BTC`. |
+| `fh_symbol_check/custom_venues/arcus.py` | Arcus (dYdX Labs DEX) checker. Hits `GET https://api.arcus.xyz/v1/markets`. `_translate_arcus` turns FH `BTC/USD-PERP` into venue `BTC-USD`. `ONLINE` → live, `OFFLINE` → inactive. |
+| `fh_symbol_check/custom_venues/ondoperps.py` | Ondo Perps checker. Hits `GET https://api.ondoperps.xyz/v1/markets`. `_translate_ondoperps` turns FH `NVDA/USD-PERP` into venue `NVDA-USD.P`. Every returned pair is live (no status field). |
+| `fh_symbol_check/api/__init__.py` | Package marker (short docstring). |
+| `fh_symbol_check/api/main.py` | Console-script `run()` for `find-expired-symbols-service`. Argparse (`--bind`, `--port`, `--creds-file`, `--exchange-map`, `--job-ttl-seconds`, `--max-concurrent-scans`, `--log-level`, `-v`), loads creds + exchange map, calls `build_app`, blocks on `uvicorn.run(...)`. Reuses `cli._install_system_trust_store` for corp-proxy trust setup. |
+| `fh_symbol_check/api/server.py` | `build_app(creds, exchange_map, *, job_ttl_seconds, max_concurrent_scans, sweep_interval_seconds, static_dir, templates_dir) -> FastAPI` factory. Registers a lifespan-managed background `asyncio.Task` running `store.sweep()` on `sweep_interval_seconds`. Mounts `/static` iff the packaged directory exists. Injects routes (`routes.api`) + views (`views.views`). |
+| `fh_symbol_check/api/routes.py` | JSON API. `POST /scans` (202 + Location + summary), `GET /scans` (list), `GET /scans/{job_id}` (detail, 404 on unknown), `GET /health`. Dependency helpers pull `store` / `workers` off `request.app.state`. |
+| `fh_symbol_check/api/views.py` | HTMX endpoints. `GET /` (form + list), `POST /` (form → `ScanRequest` → submit + return scan-card partial, or `form_error.html` partial on validation failure), `GET /scans/{job_id}/partial` (polling target; empty body on unknown-id / swept). |
+| `fh_symbol_check/api/models.py` | Pydantic schemas. `ScanRequest` (extra="forbid"; `@model_validator` reproduces the CLI's argparse error strings; `.to_filters()` -> `ScanFilters`), `ScanJobSummary` / `ScanJobDetail` / `ProgressOut` / `SymbolResultOut`, `HealthResponse`. |
+| `fh_symbol_check/api/jobs.py` | `Job` dataclass (id / state / filters / progress / created_at / completed_at / result_json / error) + `JobStore` guarded by `threading.RLock` — create / get / mark_running / update_progress / mark_done / mark_failed / sweep / active_count / recent_count. TTL sweep drops completed jobs older than `job_ttl_seconds`. Race-safe: update-on-unknown-job is a logged no-op. |
+| `fh_symbol_check/api/workers.py` | `ScanWorkers` — bounded `ThreadPoolExecutor` (`max_workers=max_concurrent_scans`). `.submit(filters, request_dump) -> Job` schedules `_run_job`. `_run_job`: `mark_running` → `pipeline.run_scan(..., on_progress=<store.update_progress bridge>)` → `mark_done(result_json=[asdict(r) for r in ...])` or `mark_failed(error="<Type>: <msg>")`. `.shutdown(wait=False)` on lifespan teardown. |
+| `fh_symbol_check/api/templates/base.html` | HTML shell: loads `/static/htmx.min.js` and `/static/app.css`; header nav; footer with version + TTL. |
+| `fh_symbol_check/api/templates/home.html` | Filter form (source / hostname / exchange_name / symbol / concurrency + checkboxes) — HTMX-posts to `/` with `hx-target="#scans-list" hx-swap="afterbegin"`. Renders each existing `recent_jobs` entry via `{% include "scan_card.html" %}`. |
+| `fh_symbol_check/api/templates/scan_card.html` | State-aware card. `queued`/`running` carries `hx-get="/scans/{{ job.id }}/partial" hx-trigger="every 1s" hx-swap="outerHTML"`. `done` shows completion time + row count + JSON link + `{% include "result_table.html" %}`. `failed` shows the error message. |
+| `fh_symbol_check/api/templates/result_table.html` | Status-filter chip row + rows table (status / source / hostname / fh_name / exchange / original / ccxt / detail). ~15-line inline `<script>` toggles a `data-status` container attr; CSS attribute selectors hide non-matching rows — no JS framework beyond HTMX itself. |
+| `fh_symbol_check/api/templates/form_error.html` | Small inline validation-error card returned in place of a scan card when the form fails Pydantic validation. |
+| `fh_symbol_check/api/static/htmx.min.js` | HTMX 1.9.12, MIT-licensed, 48KB minified. Vendored — never hits a CDN. |
+| `fh_symbol_check/api/static/app.css` | ~200 lines, CSS variables for light/dark theme, status pills, progress bar, responsive form grid, sticky table header. |
+| `deploy/find-expired-symbols.service` | systemd **user** unit template for the API service. `Type=exec`, `ExecStart=%h/.pixi/bin/pixi run -e find-expired-symbols find-expired-symbols-service --bind 127.0.0.1 --port 8000`, `Restart=on-failure`, `WantedBy=default.target`. Operator copies to `~/.config/systemd/user/`, `systemctl --user enable --now`, `sudo loginctl enable-linger $USER`. Full first-time flow + update flow in `deploy.md`. |
+| `tests/test_pipeline.py` | Locks the CLI/API pipeline contract: `ScanFilters.validate` error strings, `describe_filters` output, `run_scan` DB routing per `source`, `--symbol` OR-semantics, DB-error propagation, progress-callback phase order + monotonic completion counter + exception swallow. |
+| `tests/test_api_models.py` | Pydantic layer: `ScanRequest` rejects the same combinations argparse rejects with identical wording, `.to_filters()` maps every field, `extra="forbid"` catches typos, `concurrency` bounded 1-32. |
+| `tests/test_api_jobs.py` | `JobStore` state machine (queued/running/done/failed transitions), TTL sweep (evicts stale completed only), active/recent counters, thread-safety smoke (4 threads × 200 update_progress calls), update-on-unknown-job is a no-op. |
+| `tests/test_api_routes.py` | End-to-end JSON API via `TestClient`: `/health`, `/openapi.json` locks the surface, POST validation 422 (both wording paths), POST 202 + Location header, list, poll-to-done, DB error → `state=failed`, unknown id → 404. |
+| `tests/test_api_templates.py` | HTMX + Jinja UI: GET / renders form + HTMX bootstrap + empty state, static assets served, POST / returns scan card with polling trigger while running, done partial has result rows and no trigger, form_error partial carries CLI wording, `/scans/{id}/partial` returns empty body on unknown id. |
+| `deploy.md` | End-to-end runbook: build wheel → rsync wheel + `pixi.toml` + `pixi.lock` to a user-chosen install directory → `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall <wheel>` → creds → optional systemd user unit for the API service (`systemctl --user enable --now find-expired-symbols` + `loginctl enable-linger`) → verification / smoke test (CLI + API) → scheduler wiring (CLI, plus alternative `POST /scans` route) → uninstall / rollback → multi-user permissions appendix → troubleshooting cheatsheet (extended with API-specific symptoms). Same five steps serve both fresh installs and updates; API service needs `systemctl --user restart` after each install. |
 | `tests/__init__.py` | Empty. |
 | `tests/conftest.py` | Ensure workspace root is on `sys.path`. |
 | `tests/test_creds.py` | YAML load by section; password-mask in repr; password absent from `caplog.text`. |
@@ -36,6 +62,11 @@ Concrete "how" — files, signatures, libraries, CLI shape, exit codes. Assumes 
 | `tests/test_cli.py` | Argparse-level flag acceptance + the validation gates (`--all` exclusivity, "at least one of" requirement); `--source` accepts `fh`/`rp`/`both`, defaults to `both`, and rejects unknown choices. |
 | `tests/test_custom_venues_nado.py` | Nado parser + `fetch_symbols` mocking. |
 | `tests/test_custom_venues_polymarket_perps.py` | Polymarket Perps parser + `fetch_symbols` mocking. |
+| `tests/test_custom_venues_vertex.py` | Vertex historical parser + `_EDGES` / registry sanity + `VenueGone` shutdown path (no network) + `KeyError` on typoed edge. |
+| `tests/test_custom_venues_injective.py` | Injective LCD parser (Active/Paused/Expired/Demolished, ticker strip) + 6-URL fetch composition + merge + headers + error paths. |
+| `tests/test_custom_venues_rhlighter.py` | RH Lighter parser (perp + spot, active/inactive) + fetch URL/headers + error paths. |
+| `tests/test_custom_venues_arcus.py` | Arcus parser (ONLINE/OFFLINE) + fetch URL/headers + error paths. |
+| `tests/test_custom_venues_ondoperps.py` | Ondo Perps parser (market field, success=false) + fetch URL/headers + error paths. |
 | `tests/test_packaging.py` | Packaging-contract smoke checks: `run` is the entry-point target; `--help` mentions every filter flag; `DEFAULT_EXCHANGE_MAP` resolves and parses; exit-code constants frozen at `0/1/2/130`. |
 | `.vscode/launch.json` | Python debug configs. |
 | `README.md` | User-facing docs: install (pixi), run, creds & mapping location, CLI reference, examples, exit codes; pointer to `deploy.md` for the Linux server story. |
@@ -347,6 +378,16 @@ def run() -> int:
     catch-all exception guard (→ 2 with `logger.exception`). Both the
     source-tree launcher (`find_expired_symbols.py`) and the installed
     `find-expired-symbols` binary land here.
+
+    Before dispatching to main(), calls _install_system_trust_store()
+    which invokes truststore.inject_into_ssl(). This makes Python honour
+    the OS-native trust store (macOS Keychain / Linux system CA bundle /
+    Windows cert store) instead of the Mozilla-only bundle bundled with
+    conda-forge Python, so ccxt calls succeed on corp networks whose
+    SSL-inspection proxy (Zscaler, Palo Alto, Netskope, …) re-signs
+    HTTPS with an internal root CA. Any exception from the injection is
+    logged as WARNING and swallowed (best-effort — the tool falls back
+    to the bundled bundle rather than crashing).
     """
 ```
 
@@ -401,7 +442,14 @@ Targeted changes only:
 | `pymysql` | Already used by helper; supports parameterised queries. | conda-forge / pypi |
 | `ccxt` | Used by helper; authoritative for "is symbol listed" for ccxt-backed venues. | pypi |
 | `pyyaml` | YAML creds + exchange map. | conda-forge / pypi |
-| `urllib` (stdlib) | HTTP for custom-venue checkers (Nado, Polymarket Perps). | stdlib |
+| `truststore` | Runtime; makes Python honour the OS trust store instead of the Mozilla-only bundle. Required for ccxt HTTPS to succeed on corp networks whose SSL-inspection proxy re-signs traffic with an internal root CA. Called from `cli.run()` before dispatching to `main()`. Paired with a Chrome 126 desktop `User-Agent` set on every ccxt exchange in `check_delisted_symbol.load_exchange_markets_safe` so the proxy's non-browser-UA policy doesn't return an HTML block page instead of JSON. ERROR-row `detail` is single-lined and capped at 500 chars via `_sanitize_error_detail` in `validator.py` as a safety net. `_rewrite_proxy_block` in the same file recognises two block shapes and is called from both the ccxt path (`_classify_one_exchange`) and the custom-venue path (`_classify_custom_venue`): (1) Zscaler `wac_block.html` (URL-category deny, HTTP 403) responses, collapsed to a short "blocked by corporate proxy … — contact IT to allowlist this exchange host" hint with the HTML stripped; (2) TLS teardown signatures (`UNEXPECTED_EOF_WHILE_READING`, `EOF occurred in violation of protocol`), which indicate an SNI-keyed firewall drop before any certificate is exchanged — there is no block page to strip, so the original text is kept and prefixed with "likely blocked by corporate network policy (TLS handshake closed before certificate exchange)". Custom-venue fetch errors embed the failing URL so the hint names the host to allowlist. The full raw error is preserved at DEBUG-level log in both cases. | conda-forge / pypi |
+| `cryptography` | Transitive dep of `ccxt`. Declared under `pixi.toml` `[dependencies]` (conda-forge) rather than left to PyPI resolution because recent PyPI wheels require `manylinux_2_28`, which the conda-forge Python doesn't advertise. Sourcing from conda-forge matches the interpreter's glibc. | conda-forge |
+| `pip` | Declared under `pixi.toml` `[dependencies]` (conda-forge) because pixi conda envs don't ship pip by default. Required inside the deploy env so `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall <wheel>` works. | conda-forge |
+| `urllib` (stdlib) | HTTP for custom-venue checkers (Nado, Polymarket Perps, Vertex). | stdlib |
+| `fastapi` | ASGI framework for the API service (`fh_symbol_check.api.server`). Provides route decorators, Pydantic-model request/response validation, and the auto-generated `/docs` (OpenAPI) console. Declared under `pixi.toml` `[dependencies]` (conda-forge) and `[project.dependencies]`. | conda-forge / pypi |
+| `uvicorn[standard]` / `uvicorn-standard` | ASGI server that runs the FastAPI app. `uvicorn.run(app, host=..., port=...)` in `fh_symbol_check.api.main`. Under pixi it's the `uvicorn-standard` metapackage (equivalent of the `[standard]` extra: `httptools`, `uvloop`, `websockets`, `watchfiles`). | conda-forge / pypi |
+| `jinja2` | Template engine for the HTMX views (`fh_symbol_check.api.views`). Uses the new Starlette `TemplateResponse(request, name, context)` signature. | conda-forge / pypi |
+| `python-multipart` | Required by FastAPI whenever a route uses `Form(...)`. The HTMX form target (`POST /`) posts form-encoded data. | conda-forge / pypi |
 | `pytest` | Tests. | dev only |
 | `mypy` | Type-check new package; gate. | dev only |
 | `ruff` | Lint new package; gate. | dev only |
@@ -409,7 +457,7 @@ Targeted changes only:
 | `build` (PyPA) | Wheel builder — invoked as `python -m build --wheel`. | dev only |
 | `setuptools`, `wheel` | PEP 517 build backend declared in `pyproject.toml`. | build-time |
 
-Compatible-release ranges (`pymysql>=1.1`, `ccxt>=4`, `pyyaml>=6`). No exact pins unless `pixi.lock` forces it.
+Compatible-release ranges (`pymysql>=1.1`, `ccxt>=4`, `pyyaml>=6`, `truststore>=0.10`). `cryptography` and `pip` are unpinned in `pixi.toml` (conda-forge picks latest compatible with the resolved Python). No exact pins unless `pixi.lock` forces it.
 
 ## 7. Logging
 
@@ -478,6 +526,12 @@ logging.basicConfig(
 | 15 | Wheel builds and bundles mapping | `rm -rf dist/ && pixi run -e dev python -m build --wheel && pixi run -e dev python -m zipfile -l dist/*.whl \| rg exchange_mapping.yaml` |
 | 16 | Console script installs + runs | `pip install dist/*.whl` (in a fresh venv) → `find-expired-symbols --help \| head -3` shows the argparse block |
 | 17 | Bundled mapping resolves via wheel | `python -c "from fh_symbol_check.cli import DEFAULT_EXCHANGE_MAP; print(DEFAULT_EXCHANGE_MAP)"` points at `site-packages/fh_symbol_check/data/exchange_mapping.yaml` in the install |
+| 18 | Service entry point installed | `find-expired-symbols-service --help \| head -3` shows the service argparse block |
+| 19 | API JSON surface | `pixi run -e find-expired-symbols find-expired-symbols-service &` → `curl -sSf http://127.0.0.1:8000/health \| python -m json.tool` returns `status: "ok"` |
+| 20 | API scan lifecycle | POST `/scans` with `{"exchange_name":"BINANCE"}` returns 202 with `id` + `state=queued`; polling `GET /scans/{id}` transitions to `state=done` with a populated `result` array |
+| 21 | HTMX UI serves | `curl -sSf http://127.0.0.1:8000/` returns HTML with `<form id="scan-form"` and a `/static/htmx.min.js` script tag; `/static/htmx.min.js` is 200 |
+| 22 | Systemd unit template ships | `python -m zipfile -l dist/*.whl \| rg find-expired-symbols.service` — the unit template is intentionally NOT in the wheel; it lives under `deploy/` in the repo. Operators grab it from the source tree. |
+| 23 | Templates + static bundled | `python -m zipfile -l dist/*.whl \| rg 'fh_symbol_check/api/(templates\|static)'` shows both `templates/*.html` and `static/{htmx.min.js,app.css}` |
 
 ## 10. Out-of-Scope Reminders
 - No persistent caching across runs.
@@ -500,10 +554,14 @@ name            = "find-expired-symbols"
 version         = "0.1.0"
 description     = "Report Feed Handler symbols that are no longer valid on their venues."
 requires-python = ">=3.10,<3.14"
-dependencies    = ["pymysql>=1.1", "ccxt>=4", "pyyaml>=6"]
+dependencies    = [
+    "pymysql>=1.1", "ccxt>=4", "pyyaml>=6", "truststore>=0.10",
+    "fastapi>=0.100", "uvicorn[standard]>=0.20", "jinja2>=3.1", "python-multipart>=0.0.6",
+]
 
 [project.scripts]
-find-expired-symbols = "fh_symbol_check.cli:run"
+find-expired-symbols         = "fh_symbol_check.cli:run"
+find-expired-symbols-service = "fh_symbol_check.api.main:run"
 
 [tool.setuptools]
 py-modules = ["check_delisted_symbol", "mysql_select_query"]
@@ -513,7 +571,11 @@ include = ["fh_symbol_check*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-fh_symbol_check = ["data/*.yaml"]
+fh_symbol_check = [
+    "data/*.yaml",
+    "api/templates/*.html",
+    "api/static/*",
+]
 ```
 
 ### Build & install flow (developer machine)
@@ -531,7 +593,7 @@ pixi run -e dev python -m zipfile -l dist/find_expired_symbols-*.whl \
     | rg 'fh_symbol_check/data/exchange_mapping.yaml'
 ```
 
-The wheel is portable pure-python (`py3-none-any`) — no per-platform build. Runtime deps (`pymysql`, `ccxt`, `pyyaml`) are resolved by pip at install time on the target.
+The wheel is portable pure-python (`py3-none-any`) — no per-platform build. Runtime deps (`pymysql`, `ccxt`, `pyyaml`, `truststore`) are resolved by pip at install time on the target.
 
 ### Runtime resolution of the bundled config
 
@@ -539,6 +601,34 @@ The wheel is portable pure-python (`py3-none-any`) — no per-platform build. Ru
 
 ### Deploy story (pointer)
 
-Everything about *how* to install and run the wheel on a Linux server — bootstrapping Python via pixi, shared multi-user workspace at `/opt/find-expired-symbols/`, DB creds file placement, permissions, scheduler wiring, and the `cryptography` `manylinux_2_28` workaround — lives in `deploy.md`. The template `deploy/shared-workspace-pixi.toml` is the artefact shipped alongside the wheel; nothing else on the server side is checked in.
+Everything about *how* to install and run the wheel on a Linux server — user-chosen install directory, pixi-managed env (`find-expired-symbols`) that provides Python + `pip` + all runtime deps, DB creds file placement (`$PIXI_PROJECT_ROOT/.DBCreds.yaml` via the task alias in `pixi.toml`), multi-user permissions appendix, scheduler wiring, and the `cryptography` `manylinux_2_28` workaround (both `cryptography` and `pip` are declared under `[dependencies]` in the shipped `pixi.toml` so they come from conda-forge) — lives in `deploy.md`. The API service track adds one systemd user unit (`deploy/find-expired-symbols.service`) and one follow-up command after each `pip install` (`systemctl --user restart find-expired-symbols`); full detail in `deploy.md`. Nothing about the deploy is checked in besides `pixi.toml`, `pixi.lock`, and the systemd unit template; those are the artefacts operators rsync alongside each new wheel.
 
-Version bumps: edit `[project.version]` in `pyproject.toml`, rebuild, re-scp, re-`pixi install` on the server.
+## 12. API service (implementation notes)
+
+The API service reuses `pipeline.run_scan` for the scan work and adds only three layers on top: a FastAPI HTTP surface, an in-memory JobStore, and a bounded ThreadPoolExecutor. See design §12 for the architecture-level view; the notes below record the implementation-level choices.
+
+**Framework choice.** FastAPI + uvicorn + Jinja + HTMX — chosen for:
+1. **Zero-JS UI.** HTMX polling replaces the need for WebSockets / SSE / a client-side JS framework. The whole UI is server-rendered HTML; the only client-side JS is the ~15-line inline chip filter in `result_table.html`.
+2. **One dialect.** FastAPI's Pydantic-based request validation mirrors the CLI's argparse. `ScanRequest.@model_validator` reproduces the argparse error strings verbatim so both fronts emit the same wording — captured as a test in `tests/test_api_models.py`.
+3. **Async lifespan.** FastAPI's `lifespan` context manager owns the background TTL sweeper as an `asyncio.Task`; on shutdown it's cancelled and the thread pool joined.
+
+**Concurrency stacks.** Two independent pools compose:
+- Outer: `ScanWorkers._executor` (default 2), one job per worker for the job's full lifetime.
+- Inner: `classify_symbols` `ThreadPoolExecutor` (default 4), one `load_markets()` per worker.
+
+Worst-case: `2 × 4 = 8` concurrent `load_markets` calls + 2 coordinators. All I/O-bound; the GIL isn't the bottleneck.
+
+**Progress plumbing.** The new `on_group_done: Callable[[str], None] | None` kwarg on `classify_symbols` (see §4) fires from the coordinator thread after each `as_completed()` result. `pipeline.run_scan` wires it to bump an internal counter and re-emit a `ScanProgress` snapshot; the API's worker wires that further to `store.update_progress(job.id, p)`. Progress updates are lock-guarded (`JobStore._lock: threading.RLock`).
+
+**TTL sweep.** `store.sweep()` iterates the dict once (holding the lock) and deletes completed jobs whose `completed_at` is older than TTL. In-flight jobs (`state in {queued, running}`) are never swept regardless of age. The sweeper runs on a fixed interval (default 60s) so a 1h TTL is honoured within a minute of expiry.
+
+**Package data.** The `pyproject.toml` `[tool.setuptools.package-data]` glob covers `data/*.yaml`, `api/templates/*.html`, and `api/static/*` — so both `pip install` and `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall` install the templates + `htmx.min.js` + `app.css` into `site-packages/fh_symbol_check/api/`. `build_app` resolves the packaged directories via `importlib.resources.files("fh_symbol_check").joinpath("api/{static,templates}")`, matching how `DEFAULT_EXCHANGE_MAP` resolves.
+
+**Starlette version pin.** `TemplateResponse` requires the new `(request, name, context)` signature under Starlette >= 1.6 (shipped by `fastapi>=0.141`). This is what pixi resolves today; the templates would break on older Starlette. Not a compat concern in practice — we always deploy the shipped `pixi.lock`.
+
+**Systemd unit rationale.** User unit rather than system unit for three reasons:
+1. **No root required** — one `sudo` at first-time-setup (`loginctl enable-linger`) is the only privileged step; installs and restarts run entirely under the operator's account.
+2. **Perms match the CLI** — the service reads `.DBCreds.yaml` as the operator user, using the same perms the CLI does.
+3. **Portable across boxes** — the unit template only depends on `%h` (home) and pixi being on PATH; there's no `/opt/<app>` hard-coding to edit per host.
+
+Version bumps: edit `[project.version]` in `pyproject.toml`, rebuild with `pixi run -e dev python -m build --wheel`, rsync the new wheel to `$FES_DIR` on the server, rerun `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall <wheel>`. The exact same five steps serve first-time installs and updates.

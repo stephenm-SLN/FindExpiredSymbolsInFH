@@ -12,6 +12,26 @@ class MarketLoadError(Exception):
     """Raised by load_exchange_markets_safe instead of sys.exit."""
 
 
+# ccxt's underlying HTTP client (`requests`) defaults its User-Agent to
+# `python-requests/<ver>`. Corporate SSL-inspection proxies (Zscaler,
+# Palo Alto, Netskope, …) frequently classify this as a "non-browser"
+# request on hosts categorised as Cryptocurrency/Finance and reply with
+# an HTML block page. ccxt then tries to parse the HTML as JSON, fails,
+# and raises NetworkError/ExchangeError with the full HTML embedded in
+# the exception message — which used to land verbatim in our ERROR
+# detail column.
+#
+# Sending a modern-browser UA sidesteps that policy. Exchanges accept
+# it (their own web trading UIs speak the same UA), and there's no
+# downside on networks without SSL inspection. Hard-coded version is
+# intentional — we don't need to chase the latest Chrome.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
+
 def load_exchange_markets_safe(exchange_id: str) -> tuple[ccxt.Exchange, dict]:
     """
     Library-safe variant of load_exchange_markets.
@@ -22,6 +42,9 @@ def load_exchange_markets_safe(exchange_id: str) -> tuple[ccxt.Exchange, dict]:
     if exchange_id not in ccxt.exchanges:
         raise MarketLoadError(f"'{exchange_id}' is not a supported exchange.")
     exchange = getattr(ccxt, exchange_id)()
+    if exchange.headers is None:
+        exchange.headers = {}
+    exchange.headers["User-Agent"] = _BROWSER_UA
     try:
         markets = exchange.load_markets()
     except (ccxt.NetworkError, ccxt.ExchangeError) as e:

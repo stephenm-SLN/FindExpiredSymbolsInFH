@@ -6,11 +6,15 @@ import pytest
 
 from fh_symbol_check.symbol_translation import (
     TRANSLATORS,
+    _translate_arcus,
+    _translate_injective,
+    _translate_ondoperps,
     _translate_perp_by_quote,
     _translate_perp_strip_quote,
     _translate_perp_suffix,
     _translate_perp_suffix_inverse,
     _translate_polymarketperps,
+    _translate_rhlighter,
     translate,
 )
 
@@ -109,6 +113,96 @@ def test_translate_dispatches_strip_quote_for_nado() -> None:
 )
 def test_translate_polymarketperps(raw: str, expected: str) -> None:
     assert _translate_polymarketperps(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("BTC/USDC-PERP", "BTC/USDC PERP"),
+        ("ETH/USDT-PERP", "ETH/USDT PERP"),
+        ("INJ/USDC-PERP", "INJ/USDC PERP"),
+        ("INJ/USDT", "INJ/USDT"),
+        ("WETH/USDC", "WETH/USDC"),
+        ("WEIRD-PERP", "WEIRD PERP"),
+        ("", ""),
+    ],
+)
+def test_translate_injective(raw: str, expected: str) -> None:
+    assert _translate_injective(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("BTC/USDG-PERP", "BTC"),
+        ("BTC/USDT-PERP", "BTC"),
+        ("ETH/USDG-PERP", "ETH"),
+        ("BTC-PERP", "BTC"),
+        ("META/USDG", "META/USDG"),
+        ("ETH/USDG", "ETH/USDG"),
+        ("", ""),
+    ],
+)
+def test_translate_rhlighter(raw: str, expected: str) -> None:
+    assert _translate_rhlighter(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("BTC/USD-PERP", "BTC-USD"),
+        ("ETH/USD-PERP", "ETH-USD"),
+        ("AAPL/USD-PERP", "AAPL-USD"),
+        ("BTC/USD", "BTC-USD"),
+        ("BTC-USD", "BTC-USD"),
+        ("WEIRD-PERP", "WEIRD"),
+        ("", ""),
+    ],
+)
+def test_translate_arcus(raw: str, expected: str) -> None:
+    assert _translate_arcus(raw) == expected
+
+
+def test_translate_dispatches_for_arcus() -> None:
+    assert translate("ARCUS", "BTC/USD-PERP") == "BTC-USD"
+    assert translate("ARCUS", "AAPL/USD") == "AAPL-USD"
+    assert translate("arcus", "ETH/USD-PERP") == "ETH-USD"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("NVDA/USD-PERP", "NVDA-USD.P"),
+        ("US100/USD-PERP", "US100-USD.P"),
+        ("WTI/USD-PERP", "WTI-USD.P"),
+        ("BTC/USD", "BTC-USD.P"),
+        ("BTC-USD.P", "BTC-USD.P"),
+        ("BTC-USD", "BTC-USD.P"),
+        ("WEIRD-PERP", "WEIRD.P"),
+        ("", ""),
+    ],
+)
+def test_translate_ondoperps(raw: str, expected: str) -> None:
+    assert _translate_ondoperps(raw) == expected
+
+
+def test_translate_dispatches_for_ondoperps() -> None:
+    assert translate("ONDOPERPS", "NVDA/USD-PERP") == "NVDA-USD.P"
+    assert translate("ONDOPERPS", "US100/USD-PERP") == "US100-USD.P"
+    assert translate("ondoperps", "BTC/USD-PERP") == "BTC-USD.P"
+
+
+def test_translate_dispatches_for_rhlighter() -> None:
+    assert translate("RHLIGHTER", "BTC/USDG-PERP") == "BTC"
+    assert translate("RHLIGHTER", "BTC-PERP") == "BTC"
+    assert translate("RHLIGHTER", "META/USDG") == "META/USDG"
+    assert translate("rhlighter", "ETH/USDT-PERP") == "ETH"
+
+
+def test_translate_dispatches_for_injective() -> None:
+    assert translate("INJECTIVE", "BTC/USDC-PERP") == "BTC/USDC PERP"
+    assert translate("INJECTIVE", "INJ/USDT") == "INJ/USDT"
+    assert translate("injective", "ETH/USDT-PERP") == "ETH/USDT PERP"
 
 
 def test_translate_dispatches_for_polymarketperps() -> None:
@@ -230,6 +324,10 @@ def test_registry_contains_expected_exchange_names() -> None:
     }
     expected_strip_quote = {"NADO"}
     expected_polymarketperps = {"POLYMARKETPERPS"}
+    expected_injective = {"INJECTIVE"}
+    expected_rhlighter = {"RHLIGHTER"}
+    expected_arcus = {"ARCUS"}
+    expected_ondoperps = {"ONDOPERPS"}
     expected_by_quote = {"BYBITDM", "BITGETDM", "OKEX"}
     for name in expected_linear:
         assert TRANSLATORS[name] is _translate_perp_suffix, name
@@ -239,5 +337,13 @@ def test_registry_contains_expected_exchange_names() -> None:
         assert TRANSLATORS[name] is _translate_perp_strip_quote, name
     for name in expected_polymarketperps:
         assert TRANSLATORS[name] is _translate_polymarketperps, name
+    for name in expected_injective:
+        assert TRANSLATORS[name] is _translate_injective, name
+    for name in expected_rhlighter:
+        assert TRANSLATORS[name] is _translate_rhlighter, name
+    for name in expected_arcus:
+        assert TRANSLATORS[name] is _translate_arcus, name
+    for name in expected_ondoperps:
+        assert TRANSLATORS[name] is _translate_ondoperps, name
     for name in expected_by_quote:
         assert TRANSLATORS[name] is _translate_perp_by_quote, name

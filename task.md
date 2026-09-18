@@ -8,8 +8,8 @@ All still-open work, grouped by area. Details (and their siblings, done and open
 
 ### Symbol translation / venue coverage
 - [ ] Verify `DYDXV4 → dydx` is the correct ccxt id (Phase 7b — ccxt 4.5.60 ships only one `dydx`, presumed V4)
-- [ ] Decide policy for ccxt-unsupported venues (accept `ERROR` rows or introduce a sentinel `UNSUPPORTED` status): `DRIFT`, `DRIFTDM`, `ENCLAVEDM`, `SOVERTEX`, `INJECTIVE`, `BLUEFIN`, `BLUEFINPRO`, `IDEXDM`, `AVAVERTEX`, `BERAVERTEX`, `MNTVERTEX`, `VERTEX`, `KALSHI`, `HUNDREDX`, `PYTH`, `PYTHPRO`, `BINANCEALPHA` (Phase 7b)
-- [ ] Identify FH `ARCUS`, `M2`, `THLRIP`, `THLBMX` — no ccxt id known, no custom-venue endpoint identified (Phases 7b, 7d)
+- [ ] Decide policy for ccxt-unsupported venues (accept `ERROR` rows or introduce a sentinel `UNSUPPORTED` status): `DRIFT`, `DRIFTDM`, `ENCLAVEDM`, `BLUEFIN`, `BLUEFINPRO`, `IDEXDM`, `KALSHI`, `HUNDREDX`, `PYTH`, `PYTHPRO`, `BINANCEALPHA` (Phase 7b). ~~`VERTEX`, `AVAVERTEX`, `BERAVERTEX`, `MNTVERTEX`, `SOVERTEX`~~ resolved via custom venue in Phase 7n. ~~`INJECTIVE`~~ resolved via custom venue in Phase 7p.
+- [ ] Identify FH `M2`, `THLRIP`, `THLBMX` — no ccxt id known, no custom-venue endpoint identified (Phases 7b, 7d). ~~`ARCUS`~~ resolved via custom venue in Phase 7s.
 - [ ] Resume `POLYMARKETINT`: needs the FH-side abbreviation → real slug/condition-id mapping table AND a decision on the downstream endpoint to validate against (`gamma-api.polymarket.com` vs `api.prod.polymarketexchange.com`). Until then, its rows stay `ERROR` (Phase 7d)
 - [ ] Verify assumptions with real FH samples for `WHITEBITDM` / `CRYPTOCOMDM` / `KRAKENDM` linear translators; the 14 `KRAKENDM` inverse markets are also unresolved without FH-side disambiguation (Phase 7f)
 - [ ] Verify HL family (`HLXYZ`, `HLCASH`, `HLKM`, `HLFLX`) — mapped to `hyperliquid` but FH symbol format for each variant unverified; recommend `--exchange-name HLXYZ -v --show-listed` etc. (Phase 7b)
@@ -22,8 +22,8 @@ All still-open work, grouped by area. Details (and their siblings, done and open
 ### Packaging & deploy
 - [ ] Publish wheel to the Nexus PyPI mirror so `pip install find-expired-symbols` works without a git remote (Phase 8, deferred)
 - [ ] CI job to build + publish the wheel on tag (Phase 8, deferred)
-- [ ] Ship a systemd `.service` + `.timer` example (Phase 8, deferred — user schedules externally)
-- [ ] Automate the "bootstrap `/opt/pyhost` + install `/opt/find-expired-symbols` + set permissions" pass into a helper script or Ansible role (Phase 8b)
+- [x] Ship a systemd `.service` example (Phase 8d — API service ships `deploy/find-expired-symbols.service`, user unit); a `.timer` for the CLI is still deferred (user schedules externally)
+- [ ] Automate the "create `$FES_DIR` + rsync manifest/wheel + first-run permissions + systemd unit install" pass into a helper script or Ansible role (Phase 8c/8d) — deferred; the manual flow works fine
 
 ### Nice-to-have follow-ups (Phase 9)
 - [ ] Persistent on-disk cache of `load_markets()` keyed by exchange + day
@@ -32,6 +32,7 @@ All still-open work, grouped by area. Details (and their siblings, done and open
 - [ ] `mysql_select_query.py`: context-manager pattern + connect/read timeouts
 - [ ] Schema-drift guard at startup (`DESCRIBE crypto_db.fh_config`)
 - [ ] CI workflow that runs `pytest`, `mypy`, `ruff`
+- [ ] API: persistent job storage, cancellation endpoint, WebSocket/SSE push, auth front, rate-limiting, downloadable exports (all from Phase 8d)
 
 ---
 
@@ -135,8 +136,8 @@ All still-open work, grouped by area. Details (and their siblings, done and open
 
 - [x] `exchange_mapping.yaml` expanded to 40 entries; all values validated against the live `ccxt.exchanges` list
   - Newly mapped (29): APEX, ASTER, BACKPACK, BITGET, BITGETDM, BITHUMB, BITSTAMP, BITVAVO, BYBIT, BYBITDM, COINBASE, COINONE, CRYPTOCOM, CRYPTOCOMDM, DYDXV4, GRVT, HUOBICOINSWAP, HYPERLIQUID, KRAKEN, KRAKENDM, LIGHTER, MEXC, OKEX, PARADEX, PHEMEX, PHEMEXDMCOIN, PHEMEXDMT, UPBIT, WHITEBITDM
-  - Outstanding (need user input): CBITL, NADO, ARCUS, M2, HLXYZ, THLRIP, THLBMX, HLCASH, HLKM, HLFLX
-  - Known-unsupported by ccxt 4.5.60 (left unmapped → will surface as ERROR): DRIFT, DRIFTDM, ENCLAVEDM, SOVERTEX, INJECTIVE, BLUEFIN, BLUEFINPRO, IDEXDM, AVAVERTEX, BERAVERTEX, MNTVERTEX, VERTEX, POLYMARKETINT, POLYMARKETPERPS, KALSHI, HUNDREDX, PYTH, PYTHPRO, BINANCEALPHA
+  - Outstanding (need user input): CBITL, M2, HLXYZ, THLRIP, THLBMX, HLCASH, HLKM, HLFLX
+  - Custom-venue backed (no longer ERROR by default): NADO, POLYMARKETPERPS (Phase 7d), VERTEX, AVAVERTEX, BERAVERTEX, MNTVERTEX, SOVERTEX (Phase 7n), INJECTIVE (Phase 7p), RHLIGHTER (Phase 7q), ARCUS (Phase 7s), ONDOPERPS (Phase 7t).
 - [x] Refactored translator dispatch from `dict[ccxt_id, fn]` to `dict[exchange_name, fn]` so multiple FH names sharing a ccxt id can each have their own format (resolves 3-way collisions on `htx` and `phemex`)
   - Linear `-PERP` registered for: BINANCEDM, GATEIODM, HUOBIDM, KUCOINDM, PHEMEXDMT, WOO, WOODEX
   - Inverse `-PERP` registered for: BINANCEDMCOIN, HUOBICOINSWAP, PHEMEXDMCOIN
@@ -152,7 +153,7 @@ All still-open work, grouped by area. Details (and their siblings, done and open
 - [ ] Verify `DYDXV4 → dydx` is correct (ccxt 4.5.60 only ships one `dydx`, presumed to be V4)
 - [x] Determine FH symbol convention for BYBITDM / BITGETDM / CRYPTOCOMDM / KRAKENDM / WHITEBITDM and register translators — done in Phases 7e + 7f. Open: KRAKENDM inverse (14 markets) still unresolved; CRYPTOCOMDM/WHITEBITDM/KRAKENDM assumptions noted in 7f and need a real-run sanity check.
 - [ ] Decide what to do with the unsupported-by-ccxt set (accept ERROR rows vs. add a sentinel `UNSUPPORTED` status)
-- [ ] Identify ARCUS / M2 / THLRIP / THLBMX
+- [ ] Identify M2 / THLRIP / THLBMX
 - [x] Identified CBITL → `coinbaseinternational` (linear -PERP translator registered; assumes FH stores `<BASE>/USDC-PERP` style symbols — verify with `--exchange-name CBITL -v --show-listed`)
 - [x] Identified NADO (https://docs.nado.xyz/) — DEX on Ink L2 by the Kraken team; no `ccxt 4.5.60` support, remains in the unsupported list
 - [x] Identified HLXYZ / HLCASH / HLKM / HLFLX as Hyperliquid variants → all mapped to `hyperliquid` (no translator registered yet — FH symbol format for each variant not yet verified; recommend `--exchange-name HLXYZ -v --show-listed` etc. to confirm)
@@ -244,6 +245,160 @@ All still-open work, grouped by area. Details (and their siblings, done and open
   - Existing tests: 3 pre-existing repaired (CSV header + `ExchangeSummary` constructor + `--exchange-grouping` TOTAL row cells).
 - [x] Gates clean: ruff, mypy, **186 pytest** (was 166; +20 new).
 - [x] Docs sync: `requirements.md`, `design.md`, `implementation.md`, `README.md`, `task.md`.
+
+## Phase 7k — SSL trust store via `truststore` (fixes UPBIT/KRAKEN/… all-ERROR on corp networks)
+
+- [x] User report: every `UPBIT` symbol was landing as `ERROR`.
+- [x] Diagnosed live: `ccxt.upbit().load_markets()` fails with `SSL: CERTIFICATE_VERIFY_FAILED — unable to get local issuer certificate`; `openssl s_client -connect api.upbit.com:443` shows the chain re-signed by `CN=Zscaler Intermediate Root CA (zscalerthree.net)` / `CN=Zscaler Root CA`. The pixi conda-forge trust store at `.pixi/envs/<env>/ssl/cert.pem` is the Mozilla bundle only and doesn't include the corp Zscaler root, so verify fails. ccxt bubbles it up as `NetworkError`; the validator (per its exchange-wide catch in `_classify_one_exchange`) marks every task in the group `ERROR` with `detail="load_markets failed: upbit GET https://api.upbit.com/v1/market/all"`. Same symptom on `KRAKEN` from the same machine; `BINANCE` is unaffected because Zscaler bypasses that host.
+- [x] Fix (per user pick, option C): added `truststore>=0.10` as a **runtime** dependency (present on both conda-forge and PyPI, requires Python 3.10+ which matches our pin) and call `truststore.inject_into_ssl()` at the top of `fh_symbol_check.cli.run()`. Injection monkey-patches `ssl.create_default_context` to use the OS-native trust store (macOS Keychain / Linux system CA bundle / Windows cert store), so any corp root IT has already installed system-wide is picked up automatically.
+  - `pyproject.toml`: `truststore>=0.10` added to `[project.dependencies]` (so the wheel declares the dep for downstream `pip install`s).
+  - `pixi.toml`: `truststore = ">=0.10"` moved into `[dependencies]` (not `[feature.dev.dependencies]`) so both dev and default pixi envs get it.
+  - `deploy/shared-workspace-pixi.toml`: `truststore = ">=0.10"` added to `[dependencies]` next to `cryptography` — the server workspace resolves it from conda-forge like the rest of the C-adjacent stack. Doc comment explains the corp-egress motivation.
+  - `fh_symbol_check/cli.py`: new private `_install_system_trust_store()` helper called from `run()`. Best-effort: any exception (missing package, incompatible Python, injection error) is caught, logged as WARNING, and the tool falls back to the bundled bundle rather than crashing.
+- [x] Verified live: with injection active, `ccxt.upbit().load_markets()` = OK (807 markets), `ccxt.kraken().load_markets()` = OK (1430 markets), `ccxt.binance().load_markets()` still = OK (4552 markets).
+- [x] 3 new pytest cases in `test_cli.py`:
+  - `test_run_calls_truststore_inject_into_ssl_once` — `run()` invokes `truststore.inject_into_ssl` exactly once per invocation.
+  - `test_run_survives_missing_truststore` — a raising `inject_into_ssl` is downgraded to a WARNING log; run() still returns cleanly.
+  - `test_run_returns_operational_failure_on_unhandled_exception` — the truststore step does not swallow unrelated exceptions from `main()`; the existing catch-all → EXIT_OPERATIONAL_FAILURE contract is preserved.
+- [x] Gates clean: ruff, mypy, **189 pytest** (was 186; +3 new).
+- [x] Docs: README troubleshooting row (all-ERROR on one exchange), deploy.md troubleshooting row (with the concrete server-side CA bundle path + verification `awk` snippet), task.md this entry.
+
+Notes for reviewers:
+- The `truststore` package is maintained by the PSF/pip team; pip itself uses it since 24.2 for the same reason. It's a small pure-Python monkey-patch, not a C extension.
+- The fix is entirely transparent — no CLI flag, no config file. The only observable difference in a corp-network run is that previously-erroring exchanges now load. Runs on machines whose OS trust store is already the Mozilla bundle (i.e. no corp SSL inspection) behave identically to before.
+- If a downstream user really wants to disable it (e.g. to debug), the fallback path is auto-triggered on `ImportError` — so uninstalling truststore is a valid escape hatch.
+
+## Phase 7l — Browser User-Agent for ccxt + ERROR-detail sanitisation
+
+- [x] Follow-up to 7k: after truststore let HTTPS through end-to-end, Zscaler began **inspecting** requests and replying with an HTML block page for hosts categorised as Cryptocurrency (Upbit, Kraken, OKX). The trigger was the User-Agent — ccxt's underlying `requests` client defaults to `python-requests/<ver>`, which Zscaler classifies as non-browser. The block-page HTML then landed verbatim in the report's `detail` column for every ERROR row (ccxt wraps the HTML into `NetworkError`/`ExchangeError` messages).
+- [x] Fix 1 — modern browser UA: `check_delisted_symbol.load_exchange_markets_safe` now sets `exchange.headers["User-Agent"]` to a Chrome 126 desktop UA before calling `load_markets()`. Hard-coded string (no auto-refresh), extensive comment explains the corp-proxy motivation. Exchange WAFs accept it since it matches their own web trading UI, and it's a no-op on networks without SSL inspection.
+- [x] Fix 2 — defense-in-depth `_sanitize_error_detail(text)` in `fh_symbol_check.validator`: collapses runs of whitespace (incl. newlines) to single spaces and caps at `_MAX_ERROR_DETAIL_LEN = 500` chars with a trailing `…`. Applied inside `_error_result` so every ERROR-row `detail` (from any of the three error paths: unknown exchange, `MarketLoadError`, unexpected `Exception`) is guaranteed clean. LISTED/INACTIVE/DELISTED details are untouched (they're already short/controlled).
+- [x] 8 new pytest cases:
+  - New `tests/test_check_delisted_symbol.py`: `load_exchange_markets_safe` sets browser UA (starts with `Mozilla/5.0`, contains `Chrome/`); handles `headers=None`; rejects unknown exchange; wraps ccxt errors as `MarketLoadError`.
+  - Additions to `tests/test_validator.py`: `_sanitize_error_detail` collapses whitespace, caps length with `…`, is idempotent on short input; `_error_result` end-to-end proof with a giant HTML blob → single-line ≤ 500-char detail.
+- [x] Verified live from the same corp-proxy env: `upbit` = 807 markets, `kraken` = 1430, `binance` = 4552, `okx` = 4172 — all four exchanges now load with the browser UA.
+- [x] Gates clean: ruff, mypy, **197 pytest** (was 189; +8 new).
+
+## Phase 7m — Zscaler URL-category block detection (HUOBI / HTX)
+
+- [x] User report: every HUOBI / HUOBIDM symbol was ERROR again. Different failure mode from Upbit (7l): Zscaler's **Web Access Control** (template `wac_block.html`, HTTP **403** — not 200 + browser-check) denies outbound traffic to `api.huobi.pro` / `api.htx.com` by URL category, regardless of User-Agent. HTX/Huobi is US-sanctioned and blocked by default on many enterprise Zscaler tenants.
+- [x] Nothing to fix in transport — the corp proxy is blocking the host outright. But the ~14 KB HTML block body was landing (sanitised to 500 chars) in every ERROR row's `detail`, making reports and logs unreadable.
+- [x] Added `_rewrite_proxy_block(ccxt_id, err_text) -> str | None` in `fh_symbol_check.validator`. Extensible tuple `_PROXY_BLOCK_SENTINELS` maps a sentinel substring to a vendor label; the first hit wins. When a sentinel matches, the raw message is replaced with:
+  ```
+  blocked by corporate proxy (Zscaler wac_block.html); <ccxt HTTP summary line> — contact IT to allowlist this exchange host
+  ```
+  The head token is preserved from ccxt's own error prefix (`<ccxt_id> <METHOD> <URL> <status> <reason>`) so operators still see host + status code without any HTML.
+- [x] Wired into the `MarketLoadError` catch in `_classify_one_exchange`: WARNING log line uses the hint (cleaner scheduled-run logs), full raw text is kept at DEBUG level (`logger.debug("full underlying error for %s: %s", ccxt_id, raw)`) for when the hint isn't enough. Non-matching errors flow through unchanged so we don't hide unrelated failures.
+- [x] Also updated `check_delisted_symbol.load_exchange_markets_safe` — no code change needed there; sentinel detection lives at the report boundary in the validator so a single place owns the transformation and the raw error is unmutated for anyone else consuming `MarketLoadError`.
+- [x] 4 new pytest cases in `tests/test_validator.py`:
+  - `_rewrite_proxy_block` recognises Zscaler `wac_block.html` and includes host + status in the hint.
+  - `_rewrite_proxy_block` returns `None` for unrelated network errors (rate-limit, connection reset) — so we don't accidentally rewrite real failures.
+  - Falls back to `ccxt_id` as the head token when ccxt didn't prepend a summary line.
+  - End-to-end via `classify_symbols`: mocked loader raises `MarketLoadError` with a 14-KB `wac_block.html` payload → resulting SymbolResult.detail contains the clean hint, no HTML tags, ≤ 500 chars.
+- [x] Verified live from the same corp-proxy env: HUOBI symbols now report `[ERROR] load_markets failed: blocked by corporate proxy (Zscaler wac_block.html); htx GET https://api.huobi.pro/v2/reference/currencies 403 Forbidden — contact IT to allowlist this exchange host`.
+- [x] Docs synced: README + deploy.md troubleshooting rows for the 403 / `wac_block.html` case; implementation.md deps table entry updated; task.md this entry.
+- [x] Gates clean: ruff, mypy, **201 pytest** (was 197; +4 new).
+
+Follow-up for reviewers: `_PROXY_BLOCK_SENTINELS` is a one-liner tuple. Add new vendors when they surface (Palo Alto `pan-block`, Netskope `netskope-block`, Cisco Umbrella `umbrella-block-page`, etc.) with the same idempotent `(sentinel, vendor_label)` shape — no other code changes needed.
+
+## Phase 7n — Vertex Protocol custom venue (VERTEX + 4 edges)
+
+- [x] User report: every `VERTEX` symbol was ERROR. Root cause was correct-by-design — VERTEX (and its multi-chain edges `AVAVERTEX` / `BERAVERTEX` / `MNTVERTEX` / `SOVERTEX`) is a decentralised perpetuals+spot exchange that ccxt 4.5.60 doesn't support, so `build_tasks` was emitting the "unknown exchange_name; add it to `exchange_mapping.yaml`" ERROR for every row. Same story as INJECTIVE / BLUEFIN / KALSHI / PYTH etc. on the "cross this bridge when we come to it" list.
+- [x] User chose (via `AskQuestion`): scope = all five edges; symbol format = `BTC-PERP` (bare base + `-PERP`, same as Nado); network stance = build anyway even though the corp Zscaler blocks Vertex data endpoints at the TLS layer from the dev machine (connection reset by peer during TLS handshake — different mechanism from HUOBI's 403 + `wac_block.html` but same category: corp-blocked crypto host).
+- [x] Vertex API research: Nado is a Vertex fork, so `archive.<edge>.vertexprotocol.com/v2/symbols` returns the same `{SYMBOL: {trading_status, ...}}` shape. Edge hostnames confirmed from Vertex's own Python SDK source (`vertex_protocol.utils.backend.VertexBackendURL`):
+  - `VERTEX`     → `archive.prod.vertexprotocol.com`
+  - `AVAVERTEX`  → `archive.avax-prod.vertexprotocol.com`
+  - `BERAVERTEX` → `archive.bera-prod.vertexprotocol.com`
+  - `MNTVERTEX`  → `archive.mantle-prod.vertexprotocol.com`
+  - `SOVERTEX`   → `archive.sonic-prod.vertexprotocol.com` (decoded `SO` prefix as Sonic — flag in code comment for if it turns out to mean a different chain)
+- [x] Implementation: new module `fh_symbol_check/custom_venues/vertex.py`.
+  - Private `_EDGES: dict[str, str]` maps FH exchange_name → archive base URL (single source of truth; easy to add Base / Sei / Blast / Abstract / XRPL sidechain when they show up in FH).
+  - Private `_fetch(edge)` core: builds `{base}/v2/symbols`, GETs with the same descriptive `FindExpiredSymbolsInFH/1.0 (symbol-validation)` UA + `Accept: application/json` we use for Nado, wraps `URLError` / `TimeoutError` / JSON errors in `VertexFetchError(f"…{edge}…")` so the error message names which edge failed.
+  - Private `_parse_symbols(edge, payload)`: same status semantics as Nado (`trading_status == "live"` → True, anything else including missing → False). Uppercases keys; skips non-str keys and non-dict entries silently to survive future schema additions.
+  - Five thin public wrappers `fetch_vertex()` / `fetch_avavertex()` / `fetch_beravertex()` / `fetch_mntvertex()` / `fetch_sovertex()` so the registry in `custom_venues/__init__.py` can point at a distinct callable per venue.
+- [x] Registered all five in `CUSTOM_VENUES`. FH rows with those exchange_names now flow through `_classify_custom_venue` (via the existing `custom:` sentinel routing in the validator), so the checker slots into the summary tables and CSV/JSON schemas exactly like Nado / Polymarket Perps — no changes needed in `validator.py`, `reporter.py`, or `cli.py`.
+- [x] 16 new pytest cases in `tests/test_custom_venues_vertex.py`:
+  - Parser: live → True, non-live (`not_tradable`, `reduce_only`, missing status) → False, uppercases keys, ignores garbage entries, top-level-must-be-dict raises `VertexFetchError`, error message names the offending edge (so operators know which of the five broke).
+  - Registry: all five edges present in `_EDGES` with distinct archive hostnames (guards against copy-paste bugs); each edge maps to the exact expected subdomain; all five wrappers wired into `CUSTOM_VENUES`.
+  - `_fetch` URL composition: each of the five wrappers hits exactly its own `/v2/symbols` URL (single parametric test asserts the list of seen URLs).
+  - Happy path returns parsed liveness map; invalid JSON raises `VertexFetchError` naming the edge; URL/network errors raise `VertexFetchError` naming the edge; request sends browser-ish UA + JSON Accept header; `_fetch("VRTX")` (typo) raises `KeyError` loudly.
+- [x] Verified live from the corp-proxy env: VERTEX / AVAVERTEX rows previously ERROR with `unknown exchange_name='VERTEX'; add it to exchange_mapping.yaml`; now ERROR with `custom venue fetch failed: failed to fetch VERTEX symbols: <urlopen error [Errno 54] Connection reset by peer>`. Short, single-line, sanitiser doesn't even trigger. On any network where IT allowlists the Vertex archive hostnames (or on the deploy server if its egress differs), the checker will actually classify LISTED / INACTIVE / DELISTED.
+- [x] Gates clean: ruff, mypy, **217 pytest** (was 201; +16 new).
+
+Follow-ups / open questions for reviewers:
+
+1. **SOVERTEX = Sonic?** Moot — all edges are gone (Phase 7r).
+2. **Zscaler unblock request.** Superseded by Phase 7r. The TLS EOF on `archive.*.vertexprotocol.com` was leftover DNS to a shut-down service, not a proxy allowlist miss. The `_rewrite_proxy_block` TLS-teardown hint remains useful for *other* custom venues.
+3. **Symbol format is a guess.** Moot — every Vertex-family symbol is now `DELISTED` because the venue shut down, regardless of ticker form.
+
+## Phase 7o — TLS-teardown block detection (custom venues; VERTEX on the deploy server)
+
+- [x] User report: after deploying to `SGP-DEVOPS-MBS-02`, every Vertex-family symbol was ERROR with `custom venue fetch failed: failed to fetch AVAVERTEX symbols: <urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1032)>`.
+- [x] Diagnosed live on the server and confirmed it is **not** a code, trust-store, or User-Agent problem:
+  - `openssl s_client -connect archive.avax-prod.vertexprotocol.com:443 -servername …` → TCP `CONNECTED`, then `SSL handshake has read 0 bytes and written 357 bytes`, `no peer certificate available`. The connection is killed after the SNI is read and before any TLS response, so nothing decrypted the request. Rules out `truststore` (which only addresses `CERTIFICATE_VERIFY_FAILED`) and the UA (never sent — no HTTP request happens).
+  - No interception certificate is presented, so this is **not** the `wac_block.html` mechanism from Phase 7m and **not** an SSL-inspection bypass issue. Earlier speculation that the fix was a bypass-list entry was wrong; the ask is a firewall / URL-filtering **allow** rule.
+  - DNS resolves to two real public IPs (`216.150.16.129`, `216.150.1.129`) and TCP connects, so traffic isn't being redirected to a proxy — an inline device is killing it mid-path.
+  - `curl https://archive.prod.nado.xyz/v2/symbols` → **200** from the same box, same code path, same UA, same minute. Nado is a Vertex fork serving the identical `/v2/symbols` API, so crypto-API egress in general works; the denial is specific to `vertexprotocol.com` (likely URL category, with `nado.xyz` uncategorised).
+  - All five edges fail identically, so the `*.vertexprotocol.com` allowlist IT added earlier is not in effect for any of them.
+- [x] Escalated to IT with the above as evidence. Ticket asks for an allow rule on all five `archive.*.vertexprotocol.com` hostnames and explicitly notes it is not a bypass request. **Superseded by Phase 7r** — the hosts are gone (Vertex shutdown), not blocked.
+- [x] Code: extended `_rewrite_proxy_block` in `validator.py` with a second signature class, `_TLS_TEARDOWN_SENTINELS` (`UNEXPECTED_EOF_WHILE_READING`, `EOF occurred in violation of protocol`). Unlike the block-page branch there's no HTML to strip, so the original text is preserved and prefixed with `likely blocked by corporate network policy (TLS handshake closed before certificate exchange)` + `— contact IT to allowlist this host`. Hedged with "likely" because an upstream outage produces the same signature. Block-page sentinels are still checked first (more specific — names the vendor).
+- [x] Code: wired `_rewrite_proxy_block` into `_classify_custom_venue`, mirroring the WARNING-hint / DEBUG-raw split already used in `_classify_one_exchange`. Previously only the ccxt path got block detection.
+- [x] Code: custom-venue fetch errors now embed the failing URL (`failed to fetch AVAVERTEX symbols from https://…/v2/symbols: …`) in `vertex.py`, `nado.py`, and `polymarket_perps.py`, so the hint names the exact host to put in the IT ticket. Rendered detail is 357 chars — single line, well under the 500-char `_sanitize_error_detail` cap.
+- [x] Corrected the now-stale comment in `vertex.py` that described the deploy server's egress as unknown.
+- [x] 5 new pytest cases in `tests/test_validator.py`: TLS sentinel recognised and hostname preserved; bare openssl prose wording (`EOF occurred in violation of protocol` without the SSL constant) recognised; block-page sentinel wins when both signatures appear; end-to-end via `classify_symbols` that a `VertexFetchError` carrying the verbatim server error yields ERROR rows with the hint, the hostname, and ≤ 500 chars; ordinary failures (`502 Bad Gateway`) keep their raw detail and get no hint.
+- [x] Gates clean: ruff, mypy, **300 pytest** (was 295; +5 new).
+
+Note: this is a diagnosis-and-reporting change only. Vertex rows stay `ERROR` on this network until IT allowlists the hosts — the tool now just explains why instead of printing an `_ssl.c` traceback.
+
+## Phase 7p — Injective custom venue (INJECTIVE)
+
+- [x] User report: `unknown exchange_name='INJECTIVE'; add it to exchange_mapping.yaml`. Root cause was correct-by-design — Injective is a DEX, ccxt 4.5.60 has no `injective` / `helix` id, so a YAML mapping cannot help. Same class as Vertex (Phase 7n).
+- [x] User chose (via `AskQuestion`): translator assumes FH `BASE/QUOTE-PERP` + spot `BASE/QUOTE`; status policy = Active LISTED, Paused/Expired INACTIVE, Demolished treated as absent (DELISTED).
+- [x] Probed live LCD: `https://sentry.lcd.injective.network/injective/exchange/v1beta1/{spot,derivative}/markets` returns 129 spot + 286 derivative Active markets. Tickers are `INJ/USDT` (spot) and `BTC/USDC PERP` (space, not hyphen; all live perps currently USDC-quoted). Status filter works: Paused 36 spot / 110 deriv, Expired 0 spot / 6 dated futures (`WTIV5/USDT-22SEP25`), Demolished 19 spot / 2 deriv. Empty `?status=` still returns Active-only, so the checker issues 6 GETs.
+- [x] Implementation: `fh_symbol_check/custom_venues/injective.py` + `_translate_injective` (`BTC/USDC-PERP` → `BTC/USDC PERP`). Registered in `CUSTOM_VENUES`. Fetch errors embed the failing URL. Tickers are stripped (LCD has at least one trailing-space ticker `APP/INJ `).
+- [x] Tests: `tests/test_custom_venues_injective.py` (parser statuses, ticker strip, 6-URL composition, Demolished omitted from fetch, Active-wins merge, headers, JSON/network errors) + translator cases in `tests/test_symbol_translation.py`.
+- [x] Docs synced: README status + translator + shipped-venues table; design.md registry/translator/checker tables; implementation.md files table; this entry. Phase 7b open list no longer names INJECTIVE as unmapped.
+- [x] Gates clean: ruff, mypy, **325 pytest** (was 300).
+- [x] Follow-up: first live `--exchange-name INJECTIVE -v --show-listed` will confirm whether FH really stores `BTC/USDC-PERP` (if known-good pairs come back DELISTED, the quote or hyphen convention is wrong). Dated expired futures (`WTIV5/USDT-22SEP25`) only match if FH stores that exact ticker.
+
+## Phase 7q — Robinhood Lighter custom venue (RHLIGHTER)
+
+- [x] User report: `unknown exchange_name='RHLIGHTER'; add it to exchange_mapping.yaml`. Not a YAML fix: `RHLIGHTER` is Robinhood Chain Lighter (`https://api.rh.lighter.xyz`), a separate deployment from the existing `LIGHTER` → ccxt `lighter` mapping (`mainnet.zklighter.elliot.ai`). CoinGecko and the two live books confirm they do **not** share markets — RH has 57 perps + 27 spot (USDG), mainnet has 235 perps + 11 spot (USDC); overlap is 43 perps, 14 RH-only, 192 mainnet-only. Mapping `RHLIGHTER: lighter` would classify against the wrong universe.
+- [x] User chose (via `AskQuestion`): translator assumes FH `BASE/QUOTE-PERP` or `BASE-PERP` → venue bare base (`BTC`); spot `META/USDG` is identity.
+- [x] Implementation: `fh_symbol_check/custom_venues/rhlighter.py` hits `GET /api/v1/orderBookDetails`. `status == "active"` → LISTED, `inactive` → INACTIVE, absent → DELISTED. `_translate_rhlighter` registered. Fetch errors embed the URL. **Did not** add a YAML entry.
+- [x] Tests: `tests/test_custom_venues_rhlighter.py` + translator cases in `tests/test_symbol_translation.py`.
+- [x] Docs synced: README / design.md / implementation.md / this entry.
+- [x] Gates clean: ruff, mypy, **347 pytest** (was 325).
+- [x] Follow-up: first live `--exchange-name RHLIGHTER -v --show-listed` will confirm whether FH really stores `BTC/USDG-PERP` / `BTC-PERP`. If known-good pairs come back DELISTED, the FH form is different.
+
+## Phase 7r — Vertex Protocol shut down (July 2025 / Ink merger)
+
+- [x] User report: `archive.prod.vertexprotocol.com` is gone. Vertex Protocol shut down; DNS outlived the service. Confirmed independently: July 2025 Ink Foundation merger, all EVM edges ceased trading (4-phase shutdown 8–17 July 2025), back-end deprecated by mid-August 2025.
+- [x] This reinterprets the Phase 7o TLS EOF. Leftover DNS still resolves and TCP connects; the peer returns 0 bytes because nothing is serving TLS, not because a proxy filtered the SNI. Nado returning 200 was a red herring (Nado is a live fork on a different hostname).
+- [x] Implementation: `_fetch` no longer calls the archive hosts. It raises `VenueGone` naming the edge and former host. Validator treats `VenueGone` as `DELISTED` (counts as dead — operators should remove the config) with that message as `detail`, not `ERROR`. Historical `_parse_symbols` kept.
+- [x] Tests: five wrappers raise `VenueGone`; `urlopen` is not called; unknown edge still `KeyError`; end-to-end `classify_symbols` on VERTEX rows is DELISTED with the shutdown text.
+- [x] Docs: README / design.md / implementation.md / deploy.md troubleshooting (Vertex split out of the TLS-proxy row) / Phase 7n follow-ups marked moot / this entry.
+- [x] Gates clean: ruff, mypy, **349 pytest** (was 347).
+
+## Phase 7s — ARCUS custom venue (dYdX Labs DEX)
+
+- [x] User report: unknown `exchange_name='ARCUS'`. ccxt 4.5.60 has no `arcus` id — not a YAML mapping. Custom venue.
+- [x] Live probe: `GET https://api.arcus.xyz/v1/markets` returns 64 mainnet perps; tickers are `BTC-USD`; `status` is `ONLINE` / `OFFLINE`. OFFLINE markets are visibility-only → INACTIVE.
+- [x] Translator `_translate_arcus`: FH `BTC/USD-PERP` or `BTC/USD` → venue `BTC-USD`.
+- [x] Checker `arcus.py` keyed on `marketDisplayName` (uppercased). ONLINE → live, OFFLINE → inactive. Fetch errors include the URL. **Did not** add a YAML entry — ccxt has no `arcus` id.
+- [x] Tests: parser, fetch URL/headers, invalid JSON / network error, `CUSTOM_VENUES` registration, translator cases.
+- [x] Docs: README / design.md / implementation.md / deploy.md / this entry. ARCUS struck from the identify-open list.
+- [x] Gates clean: ruff, mypy, **370 pytest** (was 349).
+
+## Phase 7t — ONDOPERPS custom venue
+
+- [x] User report: unknown `exchange_name='ONDOPERPS'`. ccxt 4.5.60 has no `ondo` / `ondoperps` id — not a YAML mapping. Custom venue.
+- [x] Live probe: `GET https://api.ondoperps.xyz/v1/markets` returns 81 perps; tickers are `NVDA-USD.P`. No status field — present → LISTED, absent → DELISTED.
+- [x] Translator `_translate_ondoperps`: FH `NVDA/USD-PERP` / `US100/USD-PERP` → venue `NVDA-USD.P` / `US100-USD.P`.
+- [x] Checker `ondoperps.py` keyed on `market` (uppercased). `success: false` raises. Fetch errors include the URL. **Did not** add a YAML entry.
+- [x] Tests: parser, success=false, fetch URL/headers, invalid JSON / network error, `CUSTOM_VENUES` registration, translator cases.
+- [x] Docs: README / design.md / implementation.md / deploy.md / this entry.
+- [x] Gates clean: ruff, mypy, **392 pytest** (was 370).
 
 ## Phase 7g — `--exchange-grouping` summary
 
@@ -364,6 +519,72 @@ Deferred out of Phase 8b:
 
 - [ ] Provide a small helper script or Ansible role that reproduces the "bootstrap `/opt/pyhost` + install `/opt/find-expired-symbols` + set permissions" pass in one command; the manual runbook works and rerolling into automation isn't urgent.
 
+## Phase 8c — rsync-based deploy flow (supersedes Phase 8b)
+
+User asked to swap the "shared pixi workspace + wheel-in-`[pypi-dependencies]`" model out for a simpler rsync-based flow modelled on their existing `irq_service` deploy. Install directory is now user-chosen (`/opt/find-expired-symbols/`, `/home/<user>/api/find-expired-symbols/`, etc.), the wheel is installed on top of the pixi env with `pip install --no-deps --force-reinstall`, and the same five steps serve both fresh installs and updates — no separate upgrade path.
+
+- [x] `pixi.toml` — single source of truth for both dev and deploy:
+  - Added `cryptography = "*"` under `[dependencies]` (conda-forge) so the manylinux_2_28 mismatch that used to bite on the server can't recur; sourced globally instead of only in the deploy manifest.
+  - Added `pip = "*"` under `[dependencies]` so `pixi run -e find-expired-symbols pip install …` works — pixi conda envs otherwise ship without pip.
+  - Added a new `find-expired-symbols` feature carrying only the task alias (`find-expired-symbols --creds-file $PIXI_PROJECT_ROOT/.DBCreds.yaml`), plus the matching entry in `[environments]`. Users invoke with `pixi run -e find-expired-symbols …`; the task alias auto-prefills `--creds-file` and is fully relocatable via `$PIXI_PROJECT_ROOT`.
+  - Verified: `pixi info` reports the three envs (`default`, `dev`, `find-expired-symbols`) with the correct feature/dep sets for both `osx-arm64` and `linux-64`.
+- [x] Deleted `deploy/shared-workspace-pixi.toml` and the (now-empty) `deploy/` folder — the root `pixi.toml` + `pixi.lock` are what operators rsync to the server, so a separate template is redundant.
+- [x] `deploy.md` — rewritten around the 5-step flow (build wheel → rsync wheel + pixi.toml + pixi.lock → ssh → cd → `pixi run -e find-expired-symbols pip install --no-deps --force-reinstall <wheel>`). Same steps for fresh install and update. Bootstrap Python step (`/opt/pyhost`) removed — pixi provisions the interpreter directly. Kept the multi-user permissions story as an optional appendix. Kept + refreshed the troubleshooting cheatsheet (SSL trust store, User-Agent, Zscaler URL-category block, creds file location).
+- [x] `README.md` "Deploying on a Linux server" section rewritten to show the 5-step flow inline and point at `deploy.md` for the full runbook.
+- [x] `design.md` §11 pointer updated (project layout no longer lists `deploy/`; deploy story now reflects rsync-based install into a user-chosen directory and the role of `cryptography` + `pip` in `[dependencies]`).
+- [x] `implementation.md` — dropped the `deploy/shared-workspace-pixi.toml` row; refreshed the `deploy.md` row to describe the new runbook; added `cryptography` and `pip` rows to the Libraries table with their conda-forge rationale; refreshed the deploy-story pointer.
+- [x] `task.md` — this phase; also updated the packaging & deploy open-items index (`Automate …` bullet now names the new phase and directory shape).
+
+Deferred out of Phase 8c:
+
+- [ ] Automate the "create `$FES_DIR` + rsync + first-run permissions" pass into a helper script or Ansible role. The manual runbook is small enough that automation isn't urgent.
+
+## Phase 8d — REST API + HTMX browser UI service
+
+User asked to add an on-demand API service with a browser UI on top of the existing CLI. Questionnaire pinned: drives both humans + machines, on-demand only (no scheduler), async-poll (POST + poll GET), HTMX front-end, in-memory jobs with 1h TTL, no auth (rely on perimeter), keep the CLI, systemd **user** unit for supervision.
+
+Executed as five checkpoints, each gated on `pytest` / `ruff` / `mypy` before moving on.
+
+**Checkpoint 1 — pipeline refactor (241/241 tests, gates clean):**
+- [x] `fh_symbol_check/pipeline.py` — new module. `ScanFilters` (frozen dataclass mirroring argparse fields; `.validate()` reproduces argparse error strings), `ScanProgress` (immutable per-phase snapshot), `describe_filters`, `run_scan(filters, creds, exchange_map, *, on_progress=None) -> list[SymbolResult]`.
+- [x] `fh_symbol_check/validator.py` — surgical: `classify_symbols(..., on_group_done=None)` optional callback fires once per completed ccxt group; exceptions swallowed. Zero behaviour change without the kwarg.
+- [x] `fh_symbol_check/cli.py` — DB fetch → build_tasks → classify block replaced with a single `run_scan(filters, creds, exchange_map)` call. Argparse, logging, rendering, exit codes unchanged.
+- [x] `tests/test_pipeline.py` — 24 new tests covering: filter validation error strings, `describe_filters`, DB routing per `source`, DB-error propagation, `--symbol` OR-semantics wiring, progress-callback phase order, monotonic completion counter, exception swallow, `classify_symbols` `on_group_done` firing exactly once per ccxt_id.
+
+**Checkpoint 2 — API JSON skeleton (283/283 tests, gates clean):**
+- [x] `pyproject.toml` — added `fastapi`, `uvicorn[standard]`, `jinja2`, `python-multipart` to `[project.dependencies]`; added `find-expired-symbols-service = "fh_symbol_check.api.main:run"` entry point; extended `[tool.setuptools.package-data]` to include `api/templates/*.html` and `api/static/*`.
+- [x] `pixi.toml` — added `fastapi`, `uvicorn-standard`, `jinja2`, `python-multipart` under `[dependencies]` (conda-forge). Added `find-expired-symbols-service` task alias pre-filling `--creds-file $PIXI_PROJECT_ROOT/.DBCreds.yaml`.
+- [x] `fh_symbol_check/api/{__init__,main,server,routes,models,jobs,workers,views}.py` — API modules per `implementation.md` §1 additions. `views.py` shipped as a stub (empty `APIRouter`) at this checkpoint; filled in Checkpoint 3.
+- [x] `tests/test_api_models.py` (11 tests), `tests/test_api_jobs.py` (12 tests), `tests/test_api_routes.py` (12 tests) — cover Pydantic validation dialect parity with argparse, `JobStore` state machine + TTL + thread safety, and the full JSON API surface (health, list, poll-to-done, DB-error path, 404).
+- [x] `tests/test_packaging.py::test_service_run_is_a_second_console_script_entry_point` — locks the new console script name.
+
+**Checkpoint 3 — HTMX + Jinja UI (295/295 tests, gates clean):**
+- [x] `fh_symbol_check/api/templates/{base,home,scan_card,result_table,form_error}.html` — Jinja templates. `base` shells the HTMX + CSS. `home` renders the filter form (posts to `/`) + a `#scans-list` HTMX target. `scan_card` is state-aware and self-polls via `hx-get + hx-trigger="every 1s"` while queued/running; polling stops naturally when the done/failed swap drops the trigger. `result_table` includes a client-side status-chip filter (~15 lines of vanilla JS + a CSS attribute selector). `form_error` renders CLI-wording validation errors inline.
+- [x] `fh_symbol_check/api/static/htmx.min.js` — vendored HTMX 1.9.12 (MIT, 48KB).
+- [x] `fh_symbol_check/api/static/app.css` — ~200 lines, CSS variables for light + dark theme, status pills, progress bar, responsive form grid, sticky table header.
+- [x] `fh_symbol_check/api/views.py` — real implementation: `GET /`, `POST /`, `GET /scans/{id}/partial`. Uses `Jinja2Templates.TemplateResponse(request, name, context)` (Starlette 1.6 signature). Form → Pydantic validation → `form_error.html` on failure, `scan_card.html` on success. Empty body when polling a swept job so HTMX stops the loop.
+- [x] `fh_symbol_check/api/server.py` — mount `/static` conditionally; wire `views.views` router; register template environment on `app.state.templates` with a `filter_desc` Jinja filter.
+- [x] `tests/test_api_templates.py` — 12 tests: form renders, static assets serve, POST returns scan card with polling trigger while running, done card has result rows and no trigger, form_error partial carries CLI wording, unknown-id partial returns empty body.
+
+**Checkpoint 4 — systemd user unit + `deploy.md` rewrite:**
+- [x] `deploy/find-expired-symbols.service` — user unit template. `Type=exec`, `ExecStart=%h/.pixi/bin/pixi run -e find-expired-symbols find-expired-symbols-service --bind 127.0.0.1 --port 8000`, `Restart=on-failure`, `RestartSec=5s`, `WantedBy=default.target`. Comments cover first-time install + update flow.
+- [x] `deploy.md` — reworked. Kept the 5-step rsync flow; added an "API service (optional): systemd user unit" subsection under "First-time-only extras" (copy unit → `systemctl --user daemon-reload` → `systemctl --user enable --now` → `sudo loginctl enable-linger`); added an "API smoke test" alongside the CLI one; added an "Alternative: schedule against the API instead of the CLI" subsection under "Scheduler wiring"; added API-specific rows to the troubleshooting cheatsheet (connection refused, service dies on start, service stops on logout, browser cache, POST 422 wording); updated the directory-map appendix to include the API subpackage + systemd unit location. Uninstall / rollback flow updated to include `systemctl --user disable --now` and `rm -f ~/.config/systemd/user/find-expired-symbols.service`.
+
+**Checkpoint 5 — documentation sync (this checkpoint):**
+- [x] `README.md` — top-of-doc paragraph mentions the API service option; new "Running the API service" section (local dev + endpoint reference + persistence & lifecycle + service CLI reference); "Deploying on a Linux server" section notes the two console scripts + systemd wiring pointer; project layout tree extended for `fh_symbol_check/pipeline.py`, `fh_symbol_check/api/*`, `deploy/find-expired-symbols.service`.
+- [x] `design.md` — Section 1 diagram + prose extended to show `pipeline.run_scan` as the shared core with two front-ends (CLI + API). Section 2 module tree extended for `pipeline.py`, `api/*`, `deploy/`. Two new subsections: §3.9 `pipeline.py` (contract, phases, callback semantics) and §3.10 `api/` subpackage (module-by-module walkthrough + template list + static assets). Old §3.9 `custom_venues/` renumbered to §3.11; internal cross-refs updated. New §12 "Service architecture (API + HTMX UI)" — non-goals for v1, request-lifecycle diagram, concurrency model, HTMX interaction pattern, testing surface.
+- [x] `implementation.md` — §1 Files table extended with all new modules + templates + static assets + systemd unit + new test files. §6 Libraries table extended with `fastapi`, `uvicorn[standard]` / `uvicorn-standard`, `jinja2`, `python-multipart`. §9 Verification steps added for the API entry point, JSON surface, scan lifecycle, HTMX UI, packaging (templates + static bundled). §11 `pyproject.toml` snippet updated with new deps + entry point + package-data globs. New §12 "API service (implementation notes)" — framework choice, concurrency stacks, progress plumbing, TTL sweep, package data, Starlette version pin, systemd user unit rationale.
+- [x] `task.md` (this file) — new Phase 8d block; quick-index updated; Phase 9 "Suggested follow-ups" list refreshed with API-service-specific items.
+
+Deferred out of Phase 8d (moved to Phase 9 nice-to-haves):
+
+- [ ] Persistent job storage (DB / SQLite) so the JobStore survives service restart. Currently everything is dropped on restart or after 1h TTL.
+- [ ] Cancellation endpoint (`DELETE /scans/{id}` that signals the worker). No safe interruption point inside `classify_symbols` today; would need a cooperative cancellation token to plumb through.
+- [ ] WebSocket / SSE for progress push instead of 1s polling. Not urgent — scans complete in seconds and polling is dead simple through corp proxies.
+- [ ] Authentication (basic / SSO / mTLS at the reverse proxy). Out of scope for v1; the service is intended for behind-the-perimeter use.
+- [ ] Rate-limiting / abuse protection at the API level. Same reasoning.
+- [ ] Downloadable JSON / CSV export links on the done card. The `GET /scans/{id}` JSON endpoint already returns the full payload; wrapping it in a `<a download="…">` link is trivial and can wait for a user request.
+
 ## Phase 9 — Suggested follow-ups (not in this iteration)
 
 Tracked here so they don't get lost:
@@ -374,3 +595,9 @@ Tracked here so they don't get lost:
 - [ ] `mysql_select_query.py`: context-manager pattern + connect/read timeouts
 - [ ] Schema-drift guard at startup (`DESCRIBE crypto_db.fh_config`)
 - [ ] CI workflow that runs `pytest`, `mypy`, `ruff`
+- [ ] API: persistent job storage (DB / SQLite) so JobStore survives restart (from Phase 8d)
+- [ ] API: cancellation endpoint (`DELETE /scans/{id}`) with cooperative interruption inside `classify_symbols` (from Phase 8d)
+- [ ] API: WebSocket / SSE progress push (from Phase 8d — 1s polling is fine today)
+- [ ] API: authentication front (basic / SSO / mTLS at the reverse proxy) (from Phase 8d)
+- [ ] API: rate-limiting / abuse protection (from Phase 8d)
+- [ ] API: downloadable JSON / CSV export links from the done scan card (from Phase 8d)

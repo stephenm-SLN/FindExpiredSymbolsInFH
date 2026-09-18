@@ -28,10 +28,25 @@ dependencies = [
     "pymysql>=1.1",
     "ccxt>=4",
     "pyyaml>=6",
+    # See pixi.toml comment: truststore lets ccxt HTTPS calls succeed on
+    # corp networks whose SSL-inspection proxy re-signs traffic with an
+    # internal root CA (present in the OS trust store, absent from the
+    # Mozilla bundle Python ships with).
+    "truststore>=0.10",
+    # API service deps. Kept in the main dependencies list (not extras)
+    # because the deploy flow uses `pip install --no-deps
+    # --force-reinstall` and resolves runtime deps from pixi.toml — extras
+    # markers would be ignored anyway. Also lets `pip install
+    # find-expired-symbols` from a wheel elsewhere pull them in.
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.6",  # required by FastAPI for HTMX form posts
 ]
 
 [project.scripts]
 find-expired-symbols = "fh_symbol_check.cli:run"
+find-expired-symbols-service = "fh_symbol_check.api.main:run"
 
 # The two top-level helpers (`check_delisted_symbol.py`,
 # `mysql_select_query.py`) live at the repo root but are imported by
@@ -44,8 +59,14 @@ py-modules = ["check_delisted_symbol", "mysql_select_query"]
 include = ["fh_symbol_check*"]
 exclude = ["tests*", ".pixi*"]
 
-# `exchange_mapping.yaml` is code-tracked config (not a secret), so it
-# ships inside the wheel and the console script picks it up by default.
-# Operators can still override via `--exchange-map /path/to/custom.yaml`.
+# Bundled data files: exchange mapping (code-tracked config, picked up
+# by default via importlib.resources) + the API service's Jinja
+# templates and static assets (HTMX bundle + minimal CSS). Everything
+# under fh_symbol_check/api/ is packaged so `pip install` alone gives
+# operators a working service — no per-deploy asset step required.
 [tool.setuptools.package-data]
-fh_symbol_check = ["data/*.yaml"]
+fh_symbol_check = [
+    "data/*.yaml",
+    "api/templates/*.html",
+    "api/static/*",
+]

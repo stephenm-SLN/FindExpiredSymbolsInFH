@@ -23,6 +23,13 @@ for repeaters — or a single per-`(exchange, source)` table under
 `--exchange-grouping`), JSON, or CSV. JSON/CSV rows carry a `source` field
 so downstream consumers can split feed-handler and repeater rows.
 
+The same scanning logic is also exposed as a **REST API + HTMX browser UI**
+via the `find-expired-symbols-service` console script — same wheel, same
+DB creds, same exchange mapping. The API is async-poll (`POST /scans`
+returns a job ID, `GET /scans/{id}` returns state/results); the UI wraps
+it with a filter form, a live-updating scan card, and a filterable result
+table. See [Running the API service](#running-the-api-service).
+
 ---
 
 ## Contents
@@ -37,6 +44,7 @@ so downstream consumers can split feed-handler and repeater rows.
 - [How statuses are determined](#how-statuses-are-determined)
 - [How symbol translation works](#how-symbol-translation-works)
 - [Adding a new exchange](#adding-a-new-exchange)
+- [Running the API service](#running-the-api-service)
 - [Deploying on a Linux server](#deploying-on-a-linux-server)
 - [Development](#development)
 - [Project layout](#project-layout)
@@ -53,6 +61,17 @@ so downstream consumers can split feed-handler and repeater rows.
 
 You do **not** need exchange API keys: the tool only calls public
 `load_markets()` endpoints.
+
+If your outbound HTTPS goes through a corporate SSL-inspection proxy
+(Zscaler, Palo Alto, Netskope, …) the tool uses
+[`truststore`](https://truststore.readthedocs.io) at startup so Python
+honours the **OS-native** trust store (macOS Keychain / Linux system CA
+bundle / Windows cert store) instead of the Mozilla-only bundle bundled
+with conda-forge Python. As long as IT has already installed the corp
+root CA system-wide (the standard on any managed laptop or server),
+nothing more is needed. If injection can't run for some reason it's
+downgraded to a WARNING and the tool falls back to the bundled bundle —
+you'll see it in the startup logs.
 
 ## Setup
 
@@ -582,6 +601,22 @@ triple but with different rules:
 - **POLYMARKETPERPS** — present in the response → `LISTED`; absent →
   `DELISTED`. The `/v1/info/instruments` endpoint exposes no active flag,
   so this venue **never produces `INACTIVE`**.
+- **INJECTIVE** — LCD `status == "Active"` → `LISTED`. `Paused` /
+  `Expired` → `INACTIVE`. `Demolished` is not fetched, so those (and
+  anything else absent from Active/Paused/Expired) → `DELISTED`.
+- **RHLIGHTER** — venue `status == "active"` → `LISTED`. `inactive` →
+  `INACTIVE`. Absent from `/api/v1/orderBookDetails` → `DELISTED`. This
+  is Robinhood Chain Lighter (`api.rh.lighter.xyz`), **not** the
+  mainnet `LIGHTER` → ccxt `lighter` mapping.
+- **ARCUS** — `status == "ONLINE"` → `LISTED`. `OFFLINE` → `INACTIVE`
+  (docs: returned for visibility, not tradable). Absent from
+  `/v1/markets` → `DELISTED`.
+- **ONDOPERPS** — present in `/v1/markets` `tradingPairs` → `LISTED`.
+  Absent → `DELISTED`. The endpoint exposes no active flag, so this
+  venue **never produces `INACTIVE`**.
+- **VERTEX family** — no fetch. Vertex Protocol shut down July 2025
+  (Ink Foundation merger). Every configured symbol is `DELISTED` with
+  the shutdown reason in `detail`. Not an `ERROR`.
 
 See [Adding a custom (non-ccxt) venue](#adding-a-custom-non-ccxt-venue)
 for how the registered checkers plug in.
@@ -647,6 +682,10 @@ Custom (non-`-PERP`) translators handle venues with their own conventions:
 
 - `NADO` — `<BASE>/<QUOTE>-PERP` → `<BASE>-PERP` (no quote)
 - `POLYMARKETPERPS` — `<BASE>/USDC-PERP` → `<BASE>-USD` (with a `WTI`→`WTIOIL` base remap)
+- `INJECTIVE` — `<BASE>/<QUOTE>-PERP` → `<BASE>/<QUOTE> PERP` (space); spot is identity
+- `RHLIGHTER` — `<BASE>/<QUOTE>-PERP` or `<BASE>-PERP` → `<BASE>` (venue perps are a bare base); spot is identity
+- `ARCUS` — `<BASE>/<QUOTE>-PERP` or `<BASE>/<QUOTE>` → `<BASE>-<QUOTE>` (`BTC/USD-PERP` → `BTC-USD`)
+- `ONDOPERPS` — `<BASE>/<QUOTE>-PERP` or `<BASE>/<QUOTE>` → `<BASE>-<QUOTE>.P` (`NVDA/USD-PERP` → `NVDA-USD.P`)
 
 Any `exchange_name` without a registered translator falls through to
 identity (no transformation) and logs a `DEBUG` line — that's the right
@@ -717,60 +756,155 @@ directly. The framework lives in `fh_symbol_check/custom_venues/`:
 | ------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NADO`             | `GET https://archive.prod.nado.xyz/v2/symbols`                          | `<BASE>/<QUOTE>-PERP` → `<BASE>-PERP`                                                    | `trading_status == "live"` → LISTED; `post_only` / `reduce_only` / `soft_reduce_only` / `not_tradable` → INACTIVE; symbol not in response → DELISTED |
 | `POLYMARKETPERPS`  | `GET https://api.perpetuals.polymarket.com/v1/info/instruments`         | `<BASE>/USDC-PERP` → `<BASE>-USD` (with `WTI`→`WTIOIL` base remap)                       | Present → LISTED; absent → DELISTED. Endpoint exposes no active flag, so no INACTIVE state.                                                                  |
+| `VERTEX` (Arbitrum), `AVAVERTEX` (Avalanche), `BERAVERTEX` (Berachain), `MNTVERTEX` (Mantle), `SOVERTEX` (Sonic) | **No fetch.** Vertex Protocol shut down July 2025 (Ink Foundation merger). Former `archive.*.vertexprotocol.com` hosts are gone; leftover DNS produced a TLS EOF that looked like a proxy block. | Passthrough | Every configured symbol is `DELISTED` with `detail` naming the shutdown and the former archive host. Not an `ERROR`. |
+| `INJECTIVE`        | `GET https://sentry.lcd.injective.network/injective/exchange/v1beta1/{spot,derivative}/markets?status={Active,Paused,Expired}` (6 calls; `Demolished` omitted) | `<BASE>/<QUOTE>-PERP` → `<BASE>/<QUOTE> PERP`; spot is identity | `Active` → LISTED; `Paused` / `Expired` → INACTIVE; absent (including demolished) → DELISTED |
+| `RHLIGHTER`        | `GET https://api.rh.lighter.xyz/api/v1/orderBookDetails` (Robinhood Chain Lighter — not ccxt `lighter`) | `<BASE>/<QUOTE>-PERP` or `<BASE>-PERP` → `<BASE>`; spot (`META/USDG`) is identity | `status == "active"` → LISTED; `inactive` → INACTIVE; absent → DELISTED |
+| `ARCUS`            | `GET https://api.arcus.xyz/v1/markets` (dYdX Labs DEX; not in ccxt) | `<BASE>/<QUOTE>-PERP` or `<BASE>/<QUOTE>` → `<BASE>-<QUOTE>` | `ONLINE` → LISTED; `OFFLINE` → INACTIVE; absent → DELISTED |
+| `ONDOPERPS`        | `GET https://api.ondoperps.xyz/v1/markets` (Ondo Perps; not in ccxt) | `<BASE>/<QUOTE>-PERP` or `<BASE>/<QUOTE>` → `<BASE>-<QUOTE>.P` | Present → LISTED; absent → DELISTED. Endpoint exposes no active flag, so no INACTIVE state. |
 
 In `SymbolResult` output, custom-venue rows carry `ccxt_id="custom:<NAME>"`
 (e.g. `custom:NADO`) so downstream consumers can tell where the
 classification came from.
 
+## Running the API service
+
+The `find-expired-symbols-service` console script starts a FastAPI +
+uvicorn service that runs the same scans the CLI does, but async and
+polled. It's optional — install and use only if you want the browser
+UI or need machine consumers to submit scans over HTTP; the CLI keeps
+working unchanged.
+
+### Local dev
+
+```bash
+# Uses the shipped pixi task alias, which pre-fills --creds-file
+pixi run -e find-expired-symbols find-expired-symbols-service
+```
+
+Then browse to <http://127.0.0.1:8000/> for the UI and
+<http://127.0.0.1:8000/docs> for the interactive OpenAPI console.
+
+### API endpoints
+
+| Method | Path                     | Purpose                                                   |
+| ------ | ------------------------ | --------------------------------------------------------- |
+| POST   | `/scans`                 | Submit a scan; returns 202 + job summary + `Location:`    |
+| GET    | `/scans`                 | List recent (in-memory) jobs                              |
+| GET    | `/scans/{id}`            | Get one job's state, progress, and (when done) results    |
+| GET    | `/health`                | Liveness + version + active/recent counters               |
+| GET    | `/`                      | HTMX-driven UI (form + scan cards + results table)        |
+| GET    | `/docs`                  | FastAPI's auto-generated OpenAPI console                  |
+
+The `POST /scans` body accepts the same filter fields as the CLI's
+argparse (same field names, same validation error wording), plus an
+integer `concurrency` (1–32, default 4):
+
+```json
+{
+  "all": true,
+  "source": "both",
+  "errors_only": true
+}
+```
+
+`POST /scans` with `--all` combined with `--hostname` (or empty
+filters) returns HTTP 422 with the same error string the CLI's
+argparse emits. This is deliberate — one dialect for both fronts.
+
+### Persistence & lifecycle
+
+- **In-memory only.** Jobs live in a dict guarded by a lock. There is
+  no database; a process restart wipes everything.
+- **TTL sweep.** Completed jobs (`done` / `failed`) are dropped 1 hour
+  after `completed_at`. Configurable with `--job-ttl-seconds` on the
+  service CLI. In-flight jobs are never swept.
+- **Bounded concurrency.** `--max-concurrent-scans` (default 2) caps
+  in-flight scans; excess submissions queue behind them and stay in
+  the `queued` state until a worker frees up.
+- **No auth.** The service is intended for behind-the-perimeter use
+  and binds `127.0.0.1` by default. Front it with a reverse proxy
+  (nginx / traefik / caddy) if you need TLS or basic-auth.
+
+### CLI reference (service)
+
+```
+find-expired-symbols-service [--bind ADDR] [--port N]
+                             [--creds-file PATH] [--creds-section NAME]
+                             [--exchange-map PATH]
+                             [--job-ttl-seconds SECONDS]
+                             [--max-concurrent-scans N]
+                             [--log-level LEVEL] [-v]
+```
+
+Server-side deployment (systemd user unit, restart-on-update, linger)
+is documented in [`deploy.md`](deploy.md).
+
 ## Deploying on a Linux server
 
-The project is a real pip-installable package. The recommended deploy
-pattern on a shared server is a single **pixi workspace** at
-`/opt/find-expired-symbols/` that both interactive users and any
-scheduler share:
+The project ships as a wheel that installs into a pixi-managed env.
+The deploy directory is user-chosen — `/opt/find-expired-symbols/`,
+`/home/<user>/api/find-expired-symbols/`, `/srv/…/`, whatever fits.
+The same five steps run for a fresh install and for every upgrade:
 
 ```bash
-cd /opt/find-expired-symbols
-pixi run find-expired-symbols --symbol TON/USDT-PERP
+# On the dev box:
+# 1. Build the wheel
+pixi run -e dev python -m build --wheel
+
+# 2. Rsync wheel + pixi manifest + lockfile to the install directory
+rsync dist/find_expired_symbols-*.whl pixi.toml pixi.lock \
+    stephen.m@your-server:/home/stephen.m/api/find-expired-symbols/
+
+# On the server:
+# 3. SSH
+ssh stephen.m@your-server
+
+# 4. Change to the install directory
+cd /home/stephen.m/api/find-expired-symbols
+
+# 5. Install the wheel into the pixi env
+pixi run -e find-expired-symbols pip install --no-deps --force-reinstall \
+    find_expired_symbols-0.1.0-py3-none-any.whl
 ```
 
-> **For the full step-by-step runbook — including the pixi-based
-> Python bootstrap for servers whose system Python is missing `venv`
-> or is too old, the shared-task `pixi.toml`, multi-user permissions,
-> and scheduler wiring — see [`deploy.md`](deploy.md).** The short
-> pip-into-a-venv path below still works for single-user hosts.
+pixi provides the Python interpreter, `pip`, and every runtime dep
+declared in `pixi.toml` — no system Python required. `--no-deps` keeps
+pip from re-resolving deps from PyPI (which would fail on servers where
+`cryptography` PyPI wheels want a newer glibc than the conda-forge
+Python advertises); `--force-reinstall` cleanly swaps the wheel out on
+updates.
+
+**First-time-only extras.** Create `.DBCreds.yaml` in the install
+directory:
 
 ```bash
-# Fresh venv (one-time)
-python3 -m venv /opt/find-expired-symbols/venv
-/opt/find-expired-symbols/venv/bin/pip install --upgrade pip
-
-# Install from a git checkout on the server ...
-/opt/find-expired-symbols/venv/bin/pip install /path/to/checkout
-
-# ... or straight from the internal git remote (no checkout needed)
-/opt/find-expired-symbols/venv/bin/pip install \
-    'git+ssh://git@github.com/stephenm-SLN/FindExpiredSymbolsInFH.git@main'
+cat > .DBCreds.yaml <<'EOF'
+crypto_db:
+  host: <FH MySQL hostname or IP>
+  database: crypto_db
+  user: <username>
+  password: <password>
+EOF
+chmod 600 .DBCreds.yaml
 ```
 
-The wheel bundles `fh_symbol_check/data/exchange_mapping.yaml`, so the
-console script's `--exchange-map` default is populated automatically.
-The only file the operator still has to provide is the DB credential
-file:
+The `pixi.toml` includes a task alias that auto-picks it up via
+`$PIXI_PROJECT_ROOT/.DBCreds.yaml`, so users never have to pass
+`--creds-file` on the command line and the install is fully
+relocatable.
+
+The wheel installs two console scripts:
+
+- `find-expired-symbols` — the CLI
+- `find-expired-symbols-service` — the API + UI service
+
+Any scheduler (Airflow, Jenkins, cron, systemd timers, …) can invoke
+the CLI console script by absolute path:
 
 ```bash
-# Secret \u2014 lives inside the install workspace, same convention as
-# .DBCreds.yaml next to find_expired_symbols.py in the dev repo
-sudo cp .DBCreds.yaml /opt/find-expired-symbols/.DBCreds.yaml
-sudo chmod 600         /opt/find-expired-symbols/.DBCreds.yaml
-```
-
-Then any scheduler (Airflow, Jenkins, cron, systemd timers, …) can
-invoke it like a normal shell command:
-
-```bash
-/opt/find-expired-symbols/venv/bin/find-expired-symbols \
-    --creds-file /opt/find-expired-symbols/.DBCreds.yaml \
+FES_DIR=/home/stephen.m/api/find-expired-symbols
+"$FES_DIR/.pixi/envs/find-expired-symbols/bin/find-expired-symbols" \
+    --creds-file "$FES_DIR/.DBCreds.yaml" \
     --all \
     --output json \
     --output-file /var/log/find-expired-symbols/$(date +%F).json
@@ -784,14 +918,17 @@ alerting off of:
 - `2` = operational failure (bad creds, DB down, malformed mapping, …)
 - `130` = interrupted (SIGINT)
 
-If the host has `pixi` available you can equivalently keep a git
-checkout and run `pixi run python find_expired_symbols.py …` — both
-invocation styles go through the exact same code path (`run()` in
-`fh_symbol_check.cli`).
+The API service is supervised as a systemd **user** unit —
+`deploy/find-expired-symbols.service` in the repo ships a template.
+First-time setup: `systemctl --user daemon-reload && systemctl --user
+enable --now find-expired-symbols && sudo loginctl enable-linger $USER`.
+On subsequent deploys, follow step 5 with `systemctl --user restart
+find-expired-symbols` to pick up the new wheel.
 
-To upgrade to a new version, `pip install --upgrade` the same target
-inside the same venv; the bundled `exchange_mapping.yaml` is refreshed
-automatically as part of the install.
+**Full runbook**, including the API service systemd wiring,
+multi-user permissions, verification / smoke tests, uninstall /
+rollback, and a Zscaler-heavy troubleshooting cheatsheet:
+[`deploy.md`](deploy.md).
 
 ## Development
 
@@ -817,8 +954,9 @@ common filter modes.
 ├── find_expired_symbols.py     # source-checkout entry point (delegates to run())
 ├── fh_symbol_check/            # package with the actual logic
 │   ├── cli.py                  # argparse + orchestration + run() console entry
+│   ├── pipeline.py             # run_scan() — shared entry for CLI + API service
 │   ├── creds.py                # .DBCreds.yaml loader + DBCreds dataclass
-│   ├── db.py                   # fetch_feed_handlers(...)
+│   ├── db.py                   # fetch_feed_handlers(...) + fetch_repeaters(...)
 │   ├── exchange_map.py         # exchange_mapping.yaml loader + resolve()
 │   ├── symbol_translation.py   # per-FH-exchange-name translators
 │   ├── validator.py            # build_tasks + classify_symbols
@@ -827,11 +965,28 @@ common filter modes.
 │   ├── models.py               # dataclasses (FeedHandlerRow, SymbolResult, ...)
 │   ├── data/
 │   │   └── exchange_mapping.yaml  # tracked; ships inside the wheel as package data
-│   └── custom_venues/          # non-ccxt venue checkers (NADO, POLYMARKETPERPS, …)
+│   ├── api/                    # FastAPI service + HTMX UI (see "Running the API service")
+│   │   ├── main.py             # `find-expired-symbols-service` console entry
+│   │   ├── server.py           # build_app() factory + TTL sweeper
+│   │   ├── routes.py           # JSON API: /scans, /health, ...
+│   │   ├── views.py            # HTMX endpoints: GET /, POST /, GET /scans/{id}/partial
+│   │   ├── models.py           # Pydantic schemas (ScanRequest, ScanJobDetail, ...)
+│   │   ├── jobs.py             # thread-safe in-memory JobStore + TTL sweep
+│   │   ├── workers.py          # bounded ThreadPoolExecutor running pipeline.run_scan
+│   │   ├── templates/          # Jinja templates (base, home, scan_card, result_table)
+│   │   └── static/             # bundled htmx.min.js + app.css
+│   └── custom_venues/          # non-ccxt venue checkers (ARCUS, NADO, ONDOPERPS, POLYMARKETPERPS, INJECTIVE, RHLIGHTER, VERTEX family, …)
 │       ├── __init__.py         # CUSTOM_VENUES registry + sentinel helpers
+│       ├── arcus.py            # api.arcus.xyz /v1/markets client (dYdX Labs DEX)
+│       ├── injective.py        # Injective LCD REST (spot + derivative)
 │       ├── nado.py             # archive.prod.nado.xyz /v2/symbols client
-│       └── polymarket_perps.py # api.perpetuals.polymarket.com /v1/info/instruments client
-├── tests/                      # pytest suite (includes test_packaging.py)
+│       ├── ondoperps.py        # api.ondoperps.xyz /v1/markets client
+│       ├── polymarket_perps.py # api.perpetuals.polymarket.com /v1/info/instruments client
+│       ├── rhlighter.py        # api.rh.lighter.xyz orderBookDetails (Robinhood Chain)
+│       └── vertex.py           # Vertex family — venue gone (July 2025); no network
+├── deploy/
+│   └── find-expired-symbols.service  # systemd user unit template for the API service
+├── tests/                      # pytest suite (includes test_packaging.py + API tests)
 ├── .DBCreds.yaml               # git-ignored (you create this)
 ├── check_delisted_symbol.py    # reusable helper; also has its own CLI
 ├── mysql_select_query.py       # reusable MySQL client
@@ -846,7 +1001,10 @@ common filter modes.
 | Symptom                                                              | Likely cause / fix                                                                                                              |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `fatal: bad revision 'HEAD'` printed once at the top of every run    | `ccxt` imports a vendored `toolz` that probes git at import time. Make an initial commit (`git add -A && git commit -m init`).  |
-| Many `ERROR` rows for a single exchange                              | Either the `exchange_name` is missing from `exchange_mapping.yaml`, or the exchange's REST API is rate-limiting / unreachable.  |
-| Symbols you expect to be valid show as `DELISTED`                    | Almost always a symbol-translation mismatch — re-run with `-v` and compare `internal_symbol` vs `ccxt_symbol` in the report.    |
+| Every symbol on **one specific exchange** is `ERROR` with `detail: load_markets failed: <ex> GET https://…` | The exchange's `load_markets()` call is failing group-wide. On corp networks, three common causes, all about the SSL-inspection proxy (Zscaler, Palo Alto, Netskope): **(a)** the corp root CA isn't in Python's trust store — the tool calls `truststore.inject_into_ssl()` at startup, so as long as IT has added the corp root to macOS Keychain / the Linux system CA bundle / the Windows cert store this "just works"; **(b)** the proxy policy blocks non-browser User-Agents on Cryptocurrency-categorised hosts and returns an HTML block page — the tool now sends a Chrome 126 desktop UA on all ccxt calls to sidestep this; **(c)** the proxy denies the host outright via URL category (typical for HTX/Huobi — sanctioned exchange) with HTTP 403 + `wac_block.html`. Case (c) can't be fixed in code — the tool detects the sentinel and emits a clean hint (`blocked by corporate proxy (Zscaler wac_block.html); … — contact IT to allowlist this exchange host`), but the actual unblock needs IT. Re-run with `-v` to see the full underlying error at DEBUG level. |
+| Every symbol on a **custom venue** (`NADO`, `POLYMARKETPERPS`, `INJECTIVE`, `RHLIGHTER`, `ARCUS`, `ONDOPERPS`) is `ERROR` with `detail: custom venue fetch failed: likely blocked by corporate network policy (TLS handshake closed before certificate exchange); …` | A firewall in the egress path is dropping the connection mid-TLS-handshake based on the SNI hostname — TCP connects, the ClientHello goes out, and the peer returns zero bytes with no certificate. Distinct from case (c) above: nothing decrypted the request, so there's no 403 and no block page. Confirm with `openssl s_client -connect <host>:443 -servername <host> </dev/null` (look for `read 0 bytes` + `no peer certificate available`), then check a different custom venue from the same machine to show the block is destination-specific. Needs a firewall/URL-policy **allow** rule from IT — an SSL-inspection bypass won't help, since no inspection is happening. A genuine venue outage looks identical, which is why the hint says "likely". **Not Vertex** — see the next row. |
+| Every **VERTEX** / **AVAVERTEX** / **BERAVERTEX** / **MNTVERTEX** / **SOVERTEX** symbol is `DELISTED` with `detail` mentioning July 2025 / Ink Foundation | Expected. Vertex Protocol shut down in July 2025; the archive hosts are gone. The checker does not call them. Remove those symbols from FH / repeater config. |
+| Many `ERROR` rows across **many** exchanges                          | Either the `exchange_name` is missing from `exchange_mapping.yaml` (each row's `detail` starts with `unknown exchange_name=`), or you disabled `truststore` and the OS trust store lookup failed at startup — check the startup logs for `truststore injection failed`. |
+| Symbols you expect to be valid show as `DELISTED`                    | Almost always a symbol-translation mismatch — re-run with `-v` and compare `internal_symbol` vs `ccxt_symbol` in the report. Vertex-family rows are the exception: those are `DELISTED` because the venue shut down. |
 | `creds error: section 'crypto_db' not found`                         | Wrong `--creds-section` or your YAML is missing that section.                                                                   |
 | Exit code 2 with `specify --hostname, --exchange-name, --symbol, or --all` | You ran the tool with no filter. Pick one; `--all` is the explicit "scan everything" option.                              |

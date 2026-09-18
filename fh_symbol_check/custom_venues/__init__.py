@@ -22,13 +22,32 @@ from __future__ import annotations
 
 from typing import Callable, Mapping
 
-from . import nado, polymarket_perps
+from . import arcus, injective, nado, ondoperps, polymarket_perps, rhlighter, vertex
 
 CustomVenueChecker = Callable[[], Mapping[str, bool]]
 
+
+class VenueGone(Exception):
+    """The venue is permanently shut down.
+
+    The validator turns this into ``DELISTED`` for every task on the
+    venue (not ``ERROR``) so the report counts them as dead symbols
+    operators should remove, with the exception message as ``detail``.
+    """
+
+
 CUSTOM_VENUES: dict[str, CustomVenueChecker] = {
+    "ARCUS": arcus.fetch_symbols,
     "NADO": nado.fetch_symbols,
+    "ONDOPERPS": ondoperps.fetch_symbols,
     "POLYMARKETPERPS": polymarket_perps.fetch_symbols,
+    "INJECTIVE": injective.fetch_symbols,
+    "RHLIGHTER": rhlighter.fetch_symbols,
+    "VERTEX": vertex.fetch_vertex,
+    "AVAVERTEX": vertex.fetch_avavertex,
+    "BERAVERTEX": vertex.fetch_beravertex,
+    "MNTVERTEX": vertex.fetch_mntvertex,
+    "SOVERTEX": vertex.fetch_sovertex,
 }
 
 CUSTOM_VENUE_PREFIX = "custom:"

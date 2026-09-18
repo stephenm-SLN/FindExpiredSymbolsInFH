@@ -179,6 +179,22 @@ def test_classify_custom_venue_fetch_failure_emits_error_rows(
     assert all("custom venue fetch failed" in r.detail for r in results)
 
 
+def test_classify_vertex_shutdown_is_delisted_not_error() -> None:
+    """Vertex's archive API is gone. Rows must be DELISTED (so they count
+    as dead symbols to remove) with the shutdown reason, not a TLS ERROR."""
+    rows = [_row("VERTEX", ("BTC-PERP", "ETH-PERP"))]
+    tasks, _ = build_tasks(rows, exchange_map={})
+    results = classify_symbols(tasks, concurrency=1)
+
+    assert len(results) == 2
+    for result in results:
+        assert result.status == "DELISTED"
+        assert result.ccxt_id == "custom:VERTEX"
+        assert "shut down" in result.detail
+        assert "archive.prod.vertexprotocol.com" in result.detail
+        assert "custom venue fetch failed" not in result.detail
+
+
 def test_classify_custom_venue_case_insensitive_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -451,3 +467,205 @@ def test_classify_symbols_propagates_source_from_task_to_result(
     assert result.source == "repeater"
     assert result.service_id is None
     assert result.fh_name == "rp_binance_a"
+
+
+# ---------------------------------------------------------------------------
+# ERROR-detail sanitisation (defense-in-depth against HTML block pages)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_error_detail_collapses_whitespace_and_newlines() -> None:
+    """A multi-line HTML/error blob must collapse to one line so table
+    rendering doesn't wrap and detail rows stay readable."""
+    dirty = "load_markets failed:\n<html>\n<body>\n  <div>Blocked</div>\n</body></html>"
+    clean = validator_module._sanitize_error_detail(dirty)
+    assert "\n" not in clean
+    assert "  " not in clean
+    assert clean == "load_markets failed: <html> <body> <div>Blocked</div> </body></html>"
+
+
+def test_sanitize_error_detail_caps_length_with_ellipsis() -> None:
+    huge = "load_markets failed: " + ("x" * 5000)
+    clean = validator_module._sanitize_error_detail(huge)
+    assert len(clean) == validator_module._MAX_ERROR_DETAIL_LEN
+    assert clean.endswith("\u2026")
+
+
+def test_sanitize_error_detail_short_input_unchanged_except_whitespace() -> None:
+    assert validator_module._sanitize_error_detail("boom") == "boom"
+    assert validator_module._sanitize_error_detail("a  b\tc\n\nd") == "a b c d"
+
+
+def test_error_result_sanitizes_detail_end_to_end() -> None:
+    """The public path that emits ERROR rows must go through the
+    sanitiser \u2014 verify by constructing a task + a giant HTML blob and
+    checking the resulting SymbolResult.detail is short and single-line."""
+    task = ResolvedTask(
+        service_id=1,
+        fh_name="fh_upbit_1",
+        hostname="TA-TKY-A-41_LOCAL",
+        exchange_name="UPBIT",
+        ccxt_id="upbit",
+        original_symbol="BTC/KRW",
+        ccxt_symbol="BTC/KRW",
+        source="fh",
+    )
+    html_blob = "load_markets failed: upbit GET https://api.upbit.com/… <html>\n" + (
+        "<div>zscaler block</div>\n" * 500
+    )
+    result = validator_module._error_result(task, html_blob)
+    assert result.status == "ERROR"
+    assert "\n" not in result.detail
+    assert len(result.detail) <= validator_module._MAX_ERROR_DETAIL_LEN
+
+
+# ---------------------------------------------------------------------------
+# Corporate-proxy block detection (Zscaler wac_block.html and future vendors)
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_proxy_block_recognises_zscaler_wac_block() -> None:
+    raw = (
+        "htx GET https://api.huobi.pro/v2/reference/currencies 403 Forbidden "
+        '<!--# Id: wac_block.html 92615 …--> <html>… (14KB of Zscaler HTML) …</html>'
+    )
+    out = validator_module._rewrite_proxy_block("htx", raw)
+    assert out is not None
+    assert out.startswith("blocked by corporate proxy (Zscaler wac_block.html)")
+    assert "api.huobi.pro" in out
+    assert "403" in out
+    assert "contact IT" in out
+    # No HTML tags leak through into the replacement.
+    assert "<" not in out
+    assert ">" not in out
+
+
+def test_rewrite_proxy_block_returns_none_for_unrelated_error() -> None:
+    assert validator_module._rewrite_proxy_block("kraken", "connection reset by peer") is None
+    assert validator_module._rewrite_proxy_block("okx", "rate limit exceeded") is None
+
+
+# ---------------------------------------------------------------------------
+# TLS-teardown detection (SNI-level block: no block page, no certificate)
+# ---------------------------------------------------------------------------
+
+# Verbatim text observed on SGP-DEVOPS-MBS-02 for every Vertex edge.
+_VERTEX_TLS_EOF = (
+    "failed to fetch AVAVERTEX symbols from "
+    "https://archive.avax-prod.vertexprotocol.com/v2/symbols: "
+    "<urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in "
+    "violation of protocol (_ssl.c:1032)>"
+)
+
+
+def test_rewrite_proxy_block_recognises_tls_teardown() -> None:
+    out = validator_module._rewrite_proxy_block("custom:AVAVERTEX", _VERTEX_TLS_EOF)
+    assert out is not None
+    assert "likely blocked by corporate network policy" in out
+    assert "contact IT" in out
+    # The hostname to allowlist must survive — it's what goes in the ticket.
+    assert "archive.avax-prod.vertexprotocol.com" in out
+
+
+def test_rewrite_proxy_block_recognises_bare_openssl_eof_wording() -> None:
+    """Some stacks report the prose form without the SSL error constant."""
+    raw = "<urlopen error EOF occurred in violation of protocol (_ssl.c:1032)>"
+    out = validator_module._rewrite_proxy_block("custom:VERTEX", raw)
+    assert out is not None
+    assert "likely blocked by corporate network policy" in out
+
+
+def test_rewrite_proxy_block_prefers_block_page_over_tls_hint() -> None:
+    """A decrypted block page is more specific than a handshake failure, so
+    if both signatures somehow appear the vendor-named hint wins."""
+    raw = (
+        "htx GET https://api.huobi.pro/x 403 Forbidden "
+        "<!--# Id: wac_block.html --> UNEXPECTED_EOF_WHILE_READING"
+    )
+    out = validator_module._rewrite_proxy_block("htx", raw)
+    assert out is not None
+    assert out.startswith("blocked by corporate proxy (Zscaler")
+
+
+def test_classify_custom_venue_tls_teardown_yields_actionable_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a custom-venue checker dying mid-TLS-handshake must produce
+    ERROR rows explaining it's a network block, not a raw _ssl.c traceback."""
+    from fh_symbol_check.custom_venues.vertex import VertexFetchError
+
+    def boom():
+        raise VertexFetchError(_VERTEX_TLS_EOF)
+
+    monkeypatch.setattr(validator_module, "get_checker", lambda cid: boom)
+
+    rows = [_row("AVAVERTEX", ("BTC-PERP", "ETH-PERP"))]
+    tasks, _ = build_tasks(rows, exchange_map={})
+    results = classify_symbols(tasks, concurrency=1)
+
+    assert len(results) == 2
+    for result in results:
+        assert result.status == "ERROR"
+        assert "custom venue fetch failed" in result.detail
+        assert "likely blocked by corporate network policy" in result.detail
+        assert "archive.avax-prod.vertexprotocol.com" in result.detail
+        assert len(result.detail) <= validator_module._MAX_ERROR_DETAIL_LEN
+
+
+def test_classify_custom_venue_unrelated_failure_keeps_raw_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new hint must not swallow ordinary failures."""
+    def boom():
+        raise RuntimeError("502 Bad Gateway")
+
+    monkeypatch.setattr(validator_module, "get_checker", lambda cid: boom)
+
+    rows = [_row("VERTEX", ("BTC-PERP",))]
+    tasks, _ = build_tasks(rows, exchange_map={})
+    [result] = classify_symbols(tasks, concurrency=1)
+
+    assert result.status == "ERROR"
+    assert "502 Bad Gateway" in result.detail
+    assert "corporate network policy" not in result.detail
+
+
+def test_rewrite_proxy_block_falls_back_to_ccxt_id_when_no_summary_line() -> None:
+    """If ccxt didn't prepend an HTTP summary and the sentinel is at the
+    very start of the message, we still want a useful head token."""
+    raw = "<!--# Id: wac_block.html 92615 ...--> <html>...</html>"
+    out = validator_module._rewrite_proxy_block("htx", raw)
+    assert out is not None
+    assert "htx" in out
+
+
+def test_classify_symbols_zscaler_block_yields_clean_hint_in_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: mock the loader to raise MarketLoadError with a
+    wac_block.html payload; verify the resulting ERROR rows carry the
+    short 'blocked by corporate proxy' hint (not raw HTML)."""
+    from check_delisted_symbol import MarketLoadError
+
+    zscaler_payload = (
+        "htx GET https://api.huobi.pro/v2/reference/currencies 403 Forbidden "
+        '<!--# Id: wac_block.html 92615 …-->\n<html>\n' + ("<div>x</div>\n" * 500)
+    )
+
+    def fake_loader(ccxt_id: str):
+        raise MarketLoadError(zscaler_payload)
+
+    monkeypatch.setattr(validator_module, "load_exchange_markets_safe", fake_loader)
+
+    rows = [_row("HUOBI", ("BTC/USDT",))]
+    tasks, _ = build_tasks(rows, {"HUOBI": "htx"})
+    results = classify_symbols(tasks, concurrency=1)
+
+    [result] = results
+    assert result.status == "ERROR"
+    assert "blocked by corporate proxy (Zscaler" in result.detail
+    assert "api.huobi.pro" in result.detail
+    # The 14-KB HTML noise is gone.
+    assert "<div>" not in result.detail
+    assert "<html>" not in result.detail
+    assert len(result.detail) <= validator_module._MAX_ERROR_DETAIL_LEN

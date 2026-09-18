@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="filter-form">
+    <h2>Run a scan</h2>
+    <form id="scan-form"
+          hx-post="/"
+          hx-target="#scans-list"
+          hx-swap="afterbegin"
+          hx-on::after-request="if (event.detail.successful) this.reset()">
+        <div class="grid">
+            <label>
+                <span>Source</span>
+                <select name="source">
+                    <option value="both" selected>Both (feed handlers + repeaters)</option>
+                    <option value="fh">Feed handlers only (fh_config)</option>
+                    <option value="rp">Repeaters only (repeater_feeds)</option>
+                </select>
+            </label>
+            <label>
+                <span>Hostname (LIKE %...%)</span>
+                <input type="text" name="hostname" placeholder="e.g. TA-TKY-A-41">
+            </label>
+            <label>
+                <span>Exchange name</span>
+                <input type="text" name="exchange_name" placeholder="e.g. HUOBI">
+            </label>
+            <label>
+                <span>Symbol(s), space-separated</span>
+                <input type="text" name="symbol" placeholder="e.g. BTC/USDT-PERP ETH/USDT-PERP">
+            </label>
+            <label>
+                <span>Concurrency (per-scan)</span>
+                <input type="number" name="concurrency" value="4" min="1" max="32">
+            </label>
+        </div>
+        <div class="checkboxes">
+            <label class="inline">
+                <input type="checkbox" name="all" value="1">
+                <span>Scan every producer (--all)</span>
+            </label>
+            <label class="inline">
+                <input type="checkbox" name="show_listed" value="1">
+                <span>Show LISTED rows too</span>
+            </label>
+            <label class="inline">
+                <input type="checkbox" name="errors_only" value="1">
+                <span>Errors only</span>
+            </label>
+        </div>
+        <button type="submit">Start scan</button>
+        {% if form_error %}
+        <p class="form-error">{{ form_error }}</p>
+        {% endif %}
+    </form>
+</section>
+
+<section class="scans">
+    <h2>Recent scans</h2>
+    <div id="scans-list">
+        {% for job in recent_jobs %}
+        {% include "scan_card.html" %}
+        {% else %}
+        <p class="empty">No scans yet. Kick one off above.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

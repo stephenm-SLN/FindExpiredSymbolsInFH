@@ -45,7 +45,9 @@ def fetch_symbols() -> dict[str, bool]:
         with urlopen(req, timeout=NADO_FETCH_TIMEOUT_SEC) as resp:
             raw = resp.read()
     except (URLError, TimeoutError) as e:
-        raise NadoFetchError(f"failed to fetch Nado symbols: {e}") from e
+        raise NadoFetchError(
+            f"failed to fetch Nado symbols from {NADO_SYMBOLS_URL}: {e}"
+        ) from e
 
     try:
         payload = json.loads(raw)

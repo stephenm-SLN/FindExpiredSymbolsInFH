@@ -47,7 +47,8 @@ def fetch_symbols() -> dict[str, bool]:
             raw = resp.read()
     except (URLError, TimeoutError) as e:
         raise PolymarketPerpsFetchError(
-            f"failed to fetch Polymarket Perps instruments: {e}"
+            "failed to fetch Polymarket Perps instruments from "
+            f"{POLYMARKETPERPS_INSTRUMENTS_URL}: {e}"
         ) from e
 
     try:

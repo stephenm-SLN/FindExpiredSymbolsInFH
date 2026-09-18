@@ -17,12 +17,11 @@ from pathlib import Path
 from typing import TextIO
 
 from .creds import CredsError, load_creds
-from .db import DBError, fetch_feed_handlers, fetch_repeaters
+from .db import DBError
 from .exchange_map import ExchangeMapError, load_exchange_map
 from .logging_config import setup_logging
-from .models import FeedHandlerRow
+from .pipeline import ScanFilters, ScanFiltersError, describe_filters, run_scan
 from .reporter import keep_fhs_with_errors, render, summary
-from .validator import build_tasks, classify_symbols, filter_by_symbol
 
 logger = logging.getLogger("fh_symbol_check")
 
@@ -201,16 +200,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.all and (args.hostname or args.exchange_name):
-        parser.error("--all cannot be combined with --hostname or --exchange-name")
-    if not (args.all or args.hostname or args.exchange_name or args.symbol):
-        parser.error("specify --hostname, --exchange-name, --symbol, or --all")
-
     level = "DEBUG" if args.verbose else args.log_level
     setup_logging(level)
 
-    filter_desc = _describe_filters(args.hostname, args.exchange_name, args.symbol)
-    logger.info("filter: %s", filter_desc)
+    filters = ScanFilters(
+        hostname=args.hostname,
+        exchange_name=args.exchange_name,
+        all_producers=args.all,
+        symbols=tuple(args.symbol) if args.symbol else (),
+        source=args.source,
+        concurrency=args.concurrency,
+    )
+    try:
+        filters.validate()
+    except ScanFiltersError as e:
+        # Route through argparse so the wording matches other argparse
+        # errors (usage + exit code 2, no traceback).
+        parser.error(str(e))
+
+    logger.info("filter: %s", describe_filters(filters))
 
     try:
         creds = load_creds(args.creds_file, section=args.creds_section)
@@ -224,59 +232,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("exchange map error: %s", e)
         return EXIT_OPERATIONAL_FAILURE
 
-    rows: list[FeedHandlerRow] = []
-    scan_fh = args.source in ("fh", "both")
-    scan_rp = args.source in ("rp", "both")
-
-    if scan_fh:
-        try:
-            fh_rows = fetch_feed_handlers(
-                creds,
-                hostname_pattern=args.hostname,
-                exchange_name=args.exchange_name,
-            )
-        except DBError as e:
-            logger.error("DB error (fh_config): %s", e)
-            return EXIT_OPERATIONAL_FAILURE
-        if not fh_rows:
-            logger.warning("no fh_config rows matched filters (%s)", filter_desc)
-        rows.extend(fh_rows)
-
-    if scan_rp:
-        try:
-            rp_rows = fetch_repeaters(
-                creds,
-                hostname_pattern=args.hostname,
-                exchange_name=args.exchange_name,
-            )
-        except DBError as e:
-            logger.error("DB error (repeater_feeds): %s", e)
-            return EXIT_OPERATIONAL_FAILURE
-        if not rp_rows:
-            logger.warning(
-                "no repeater_feeds rows matched filters (%s)", filter_desc
-            )
-        rows.extend(rp_rows)
-
-    tasks, early_errors = build_tasks(rows, exchange_map)
-
-    if args.symbol:
-        before_tasks = len(tasks)
-        before_errors = len(early_errors)
-        tasks, early_errors = filter_by_symbol(tasks, early_errors, args.symbol)
-        logger.info(
-            "--symbol %s: matched %d/%d task(s) and %d/%d unmappable-exchange error(s)",
-            args.symbol,
-            len(tasks), before_tasks,
-            len(early_errors), before_errors,
-        )
-        if not tasks and not early_errors:
-            logger.warning(
-                "--symbol %s: 0 occurrences found in the scanned producer set",
-                args.symbol,
-            )
-
-    results = early_errors + classify_symbols(tasks, concurrency=args.concurrency)
+    try:
+        results = run_scan(filters, creds, exchange_map)
+    except DBError as e:
+        logger.error("DB error: %s", e)
+        return EXIT_OPERATIONAL_FAILURE
 
     counts = summary(results)
     logger.info(
@@ -319,21 +279,6 @@ def main(argv: list[str] | None = None) -> int:
     return EXIT_OK
 
 
-def _describe_filters(
-    hostname: str | None,
-    exchange_name: str | None,
-    symbols: list[str] | None = None,
-) -> str:
-    parts: list[str] = []
-    if hostname:
-        parts.append(f"hostname LIKE %{hostname}%")
-    if exchange_name:
-        parts.append(f"exchange_name={exchange_name!r}")
-    if symbols:
-        parts.append(f"symbols={symbols!r}")
-    return ", ".join(parts) if parts else "ALL (no filters)"
-
-
 def _open_output(path: Path | None) -> "_OutputCtx":
     if path is None:
         return _OutputCtx(sys.stdout, close=False)
@@ -356,13 +301,47 @@ class _OutputCtx:
             self._stream.close()
 
 
+def _install_system_trust_store() -> None:
+    """Monkey-patch `ssl.create_default_context` to use the OS-native trust
+    store (macOS Keychain, Linux system CA bundle, Windows cert store).
+
+    Without this, Python's default trust store is the Mozilla CA bundle
+    baked into certifi / the conda-forge `ca-certificates` package. On
+    corp networks that route HTTPS through an SSL-inspection proxy
+    (Zscaler, Palo Alto, Netskope, …) whose internal root CA is only
+    present in the OS trust store, ccxt calls to affected exchanges fail
+    with `SSL: CERTIFICATE_VERIFY_FAILED` and every symbol on the
+    affected exchange lands as ERROR.
+
+    Best-effort: if `truststore` is missing (e.g. a downstream install
+    that dropped the dep) or `inject_into_ssl` raises, we log a warning
+    and fall back to the bundled trust store rather than crashing the
+    run.
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception as e:
+        logger.warning(
+            "truststore injection failed (%s); falling back to bundled CA "
+            "bundle — HTTPS calls to exchanges whose cert chain relies on "
+            "a corp/OS root may fail SSL verify and surface as ERROR rows",
+            e,
+        )
+
+
 def run() -> int:
     """Console-script entry point.
 
     Wraps :func:`main` with a KeyboardInterrupt handler and a catch-all
     exception guard so callers (systemd, cron, Airflow, ad-hoc SSH) always
     see a documented exit code rather than a Python traceback.
+
+    Also installs the OS-native SSL trust store before any HTTPS call is
+    made — see :func:`_install_system_trust_store`.
     """
+    _install_system_trust_store()
     try:
         return main()
     except KeyboardInterrupt:

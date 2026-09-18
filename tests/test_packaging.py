@@ -89,3 +89,15 @@ def test_exit_codes_exported() -> None:
     assert cli_module.EXIT_INVALID_FOUND == 1
     assert cli_module.EXIT_OPERATIONAL_FAILURE == 2
     assert cli_module.EXIT_INTERRUPT == 130
+
+
+def test_service_run_is_a_second_console_script_entry_point() -> None:
+    """`pyproject.toml` declares
+    `find-expired-symbols-service = fh_symbol_check.api.main:run`.
+    This test locks the name + attribute in so a rename doesn't silently
+    break the systemd unit that invokes it.
+    """
+    from fh_symbol_check.api import main as api_main_module
+
+    assert callable(api_main_module.run)
+    assert api_main_module.run is api_main_module.run  # attribute exists

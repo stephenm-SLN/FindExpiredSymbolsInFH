@@ -1,0 +1,9 @@
+{# Inline form validation error. Returned in place of a scan card when the
+   POSTed form fails validation; HTMX inserts it at the top of the scans
+   list so the user sees it above their existing scans. #}
+<article class="scan-card scan-failed">
+    <header>
+        <span class="state-pill state-failed">invalid form</span>
+    </header>
+    <div class="failure"><code>{{ message }}</code></div>
+</article>

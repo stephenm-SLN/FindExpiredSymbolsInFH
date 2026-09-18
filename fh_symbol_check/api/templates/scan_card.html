@@ -1,0 +1,44 @@
+{# Renders one scan card. Polls itself every 1s while queued/running; polling
+   naturally stops when the swap replaces the outer element with a done/failed
+   variant that no longer has hx-trigger. #}
+<article class="scan-card scan-{{ job.state }}"
+    id="scan-{{ job.id }}"
+    {% if job.state in ("queued", "running") %}
+    hx-get="/scans/{{ job.id }}/partial"
+    hx-trigger="every 1s"
+    hx-swap="outerHTML"
+    {% endif %}>
+    <header>
+        <span class="state-pill state-{{ job.state }}">{{ job.state }}</span>
+        <code class="job-id" title="click to copy the URL"><a href="/scans/{{ job.id }}">{{ job.id[:8] }}</a></code>
+        <time datetime="{{ job.created_at.isoformat() }}">{{ job.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}</time>
+        <span class="filter-desc">{{ job|filter_desc }}</span>
+    </header>
+
+    {% if job.state == "running" or job.state == "queued" %}
+    <div class="progress">
+        <div class="progress-bar">
+            {% if job.progress.total_producers > 0 %}
+                {% set pct = (100 * job.progress.completed_producers // job.progress.total_producers) %}
+                <div class="progress-fill" style="width: {{ pct }}%;"></div>
+            {% endif %}
+        </div>
+        <div class="progress-text">
+            phase: {{ job.progress.phase }}
+            {% if job.progress.rows_scanned %} &middot; rows scanned: {{ job.progress.rows_scanned }}{% endif %}
+            {% if job.progress.total_producers %} &middot; {{ job.progress.completed_producers }}/{{ job.progress.total_producers }} exchanges{% endif %}
+        </div>
+    </div>
+    {% elif job.state == "failed" %}
+    <div class="failure">
+        <strong>Failed:</strong> <code>{{ job.error }}</code>
+    </div>
+    {% elif job.state == "done" %}
+    <div class="done-meta">
+        Completed in {{ (job.completed_at - job.created_at).total_seconds()|round(1) }}s
+        &middot; {{ job.result_json|length }} row(s)
+        &middot; <a href="/scans/{{ job.id }}">JSON</a>
+    </div>
+    {% include "result_table.html" %}
+    {% endif %}
+</article>
